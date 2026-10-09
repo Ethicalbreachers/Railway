@@ -3,6 +3,10 @@ import Head from 'next/head';
 
 // ==================== GRAPHQL QUERIES ====================
 const Q = {
+  // Test query — sabse simple
+  testMe: `query { me { id name email } }`,
+
+  // Get all projects with services and environments
   getProjects: `
     query {
       me {
@@ -103,7 +107,7 @@ const Q = {
   `,
 };
 
-// ==================== MAIN ====================
+// ==================== MAIN COMPONENT ====================
 export default function Home() {
   const [tokens, setTokens] = useState([]);
   const [projects, setProjects] = useState([]);
@@ -117,6 +121,8 @@ export default function Home() {
   const [showTokenModal, setShowTokenModal] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [showVarsModal, setShowVarsModal] = useState(false);
+  const [showDebugModal, setShowDebugModal] = useState(false);
+  const [debugData, setDebugData] = useState(null);
 
   const [newToken, setNewToken] = useState({
     email: '',
@@ -136,12 +142,12 @@ export default function Home() {
   // ============ LOAD ============
   useEffect(() => {
     try {
-      const t = localStorage.getItem('rw_tokens_v3');
+      const t = localStorage.getItem('rw_tokens_v4');
       if (t) {
         const p = JSON.parse(t);
         if (Array.isArray(p)) setTokens(p);
       }
-      const pr = localStorage.getItem('rw_projects_v3');
+      const pr = localStorage.getItem('rw_projects_v4');
       if (pr) {
         const p = JSON.parse(pr);
         if (Array.isArray(p)) setProjects(p);
@@ -150,23 +156,23 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (tokens.length) localStorage.setItem('rw_tokens_v3', JSON.stringify(tokens));
-    else localStorage.removeItem('rw_tokens_v3');
+    if (tokens.length) localStorage.setItem('rw_tokens_v4', JSON.stringify(tokens));
+    else localStorage.removeItem('rw_tokens_v4');
   }, [tokens]);
 
   useEffect(() => {
-    if (projects.length) localStorage.setItem('rw_projects_v3', JSON.stringify(projects));
+    if (projects.length) localStorage.setItem('rw_projects_v4', JSON.stringify(projects));
   }, [projects]);
 
   const showToast = useCallback((msg, isError = false) => {
     setToast({ msg, isError });
-    setTimeout(() => setToast(null), 4000);
+    setTimeout(() => setToast(null), 4500);
   }, []);
 
   const setStatusText = (text, type = 'ok') => setStatus({ text, type });
 
-  // ============ API ============
-  const railwayCall = async (query, variables = {}) => {
+  // ============ API CALL ============
+  const railwayCall = async (query, variables = {}, opts = {}) => {
     if (tokens.length === 0) throw new Error('Pehle token add karo!');
 
     const res = await fetch('/api/railway', {
@@ -178,20 +184,57 @@ export default function Home() {
         tokens: tokens.map((t) => ({
           email: t.email,
           name: t.name,
-          token: t.token,
+          token: t.token.trim(),
           type: t.type,
           priority: t.priority,
         })),
+        testOnly: opts.testOnly || false,
       }),
     });
 
     const data = await res.json();
-    if (!res.ok) {
-      throw new Error(
-        data.error + (data.details ? ' — ' + data.details.join(', ') : '')
-      );
+
+    // Save debug info
+    if (data.debug) {
+      setDebugData(data.debug);
+      console.log('🔍 Debug:', data.debug);
     }
+
+    if (!res.ok) {
+      const errMsg = data.error || 'Unknown error';
+      const details = data.details ? '\n\n' + data.details.join('\n') : '';
+      const err = new Error(errMsg + details);
+      err.details = data.details;
+      err.debug = data.debug;
+      throw err;
+    }
+
     return data;
+  };
+
+  // ============ TEST TOKEN (NEW) ============
+  const testTokens = async () => {
+    if (tokens.length === 0) return showToast('Pehle token add karo!', true);
+
+    setLoading(true);
+    setStatusText('Testing token...', 'loading');
+
+    try {
+      const result = await railwayCall(Q.testMe, {}, { testOnly: true });
+      const me = result.data?.me;
+
+      showToast(
+        `✅ Token SAHI hai! Account: ${me?.email || 'unknown'}`,
+        false
+      );
+      setStatusText(`✅ Token valid • ${me?.email}`);
+    } catch (err) {
+      showToast('❌ ' + err.message.split('\n')[0], true);
+      setStatusText('❌ Token galat', 'error');
+      setShowDebugModal(true);
+    } finally {
+      setLoading(false);
+    }
   };
 
   // ============ LOAD PROJECTS ============
@@ -216,11 +259,12 @@ export default function Home() {
       }));
 
       setProjects(list);
-      setStatusText(`Ready • ${result.usedAccount?.email || ''}`);
+      setStatusText(`Ready • ${me.email} • ${list.length} projects`);
       showToast(`✅ ${list.length} projects loaded`);
     } catch (err) {
       setStatusText('Error', 'error');
-      showToast('❌ ' + err.message, true);
+      showToast('❌ ' + err.message.split('\n')[0], true);
+      setShowDebugModal(true);
     } finally {
       setLoading(false);
     }
@@ -229,15 +273,25 @@ export default function Home() {
   // ============ TOKENS ============
   const addToken = () => {
     const { email, token, priority, type } = newToken;
-    if (!email.trim() || !token.trim()) {
+    const trimmedToken = token.trim();
+
+    if (!email.trim() || !trimmedToken) {
       return showToast('Naam aur token dono chahiye!', true);
+    }
+
+    if (trimmedToken.length < 20) {
+      return showToast('Token bahut chhota hai — poora copy karo!', true);
+    }
+
+    if (/\s/.test(trimmedToken)) {
+      return showToast('Token me space hai — saaf karo!', true);
     }
 
     const newT = {
       id: 'tok_' + Date.now(),
       email: email.trim(),
       name: email.trim(),
-      token: token.trim(),
+      token: trimmedToken,
       priority: parseInt(priority) || tokens.length + 1,
       type: type || 'account',
       addedAt: new Date().toISOString(),
@@ -246,7 +300,7 @@ export default function Home() {
     setTokens([...tokens, newT].sort((a, b) => a.priority - b.priority));
     setNewToken({ email: '', token: '', priority: tokens.length + 2, type: 'account' });
     setShowTokenModal(false);
-    showToast('✅ Token add ho gaya!');
+    showToast('✅ Token add ho gaya! Ab "Test Token" dabao.');
   };
 
   const deleteToken = (id) => {
@@ -260,7 +314,7 @@ export default function Home() {
     const { name } = newProject;
     if (!name.trim()) return showToast('Project naam daalo!', true);
     if (!/^[a-z0-9-]+$/.test(name)) {
-      return showToast('Sirf lowercase, numbers, hyphen allowed!', true);
+      return showToast('Sirf lowercase, numbers, hyphen!', true);
     }
 
     setLoading(true);
@@ -272,8 +326,7 @@ export default function Home() {
       setShowProjectModal(false);
       await loadProjects();
     } catch (err) {
-      setStatusText('Error', 'error');
-      showToast('❌ ' + err.message, true);
+      showToast('❌ ' + err.message.split('\n')[0], true);
     } finally {
       setLoading(false);
     }
@@ -287,7 +340,7 @@ export default function Home() {
       showToast('🗑️ Project delete ho gaya');
       await loadProjects();
     } catch (err) {
-      showToast('❌ ' + err.message, true);
+      showToast('❌ ' + err.message.split('\n')[0], true);
     } finally {
       setLoading(false);
     }
@@ -317,7 +370,7 @@ export default function Home() {
       });
       setVars(result.data?.variables || {});
     } catch (err) {
-      showToast('❌ ' + err.message, true);
+      showToast('❌ ' + err.message.split('\n')[0], true);
     } finally {
       setVarsLoading(false);
     }
@@ -345,7 +398,7 @@ export default function Home() {
         varsContext.service.id
       );
     } catch (err) {
-      showToast('❌ ' + err.message, true);
+      showToast('❌ ' + err.message.split('\n')[0], true);
     }
   };
 
@@ -365,7 +418,7 @@ export default function Home() {
         varsContext.service.id
       );
     } catch (err) {
-      showToast('❌ ' + err.message, true);
+      showToast('❌ ' + err.message.split('\n')[0], true);
     }
   };
 
@@ -400,7 +453,10 @@ export default function Home() {
     <>
       <Head>
         <title>🚂 Railway Panel</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+        <meta
+          name="viewport"
+          content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"
+        />
         <meta name="theme-color" content="#05050a" />
       </Head>
 
@@ -419,7 +475,7 @@ export default function Home() {
           </div>
         </header>
 
-        {/* MAIN CONTENT */}
+        {/* MAIN */}
         <main className="main">
           {/* ============ DASHBOARD ============ */}
           {activeTab === 'dashboard' && (
@@ -444,25 +500,33 @@ export default function Home() {
               </div>
 
               <div className="btn-row">
-                <button className="btn btn-primary" onClick={loadProjects} disabled={loading}>
+                <button
+                  className="btn btn-primary"
+                  onClick={loadProjects}
+                  disabled={loading}
+                >
                   {loading ? '⏳' : '🔄'} Refresh
                 </button>
-                <button className="btn btn-success" onClick={() => setShowTokenModal(true)}>
-                  ➕ Token
+                <button
+                  className="btn btn-warning"
+                  onClick={testTokens}
+                  disabled={loading || tokens.length === 0}
+                >
+                  🧪 Test
                 </button>
                 <button
                   className="btn btn-success"
-                  onClick={() => setShowProjectModal(true)}
-                  disabled={tokens.length === 0}
+                  onClick={() => setShowTokenModal(true)}
                 >
-                  🚀 New
+                  ➕ Token
                 </button>
               </div>
 
               {tokens.length === 0 && (
                 <div className="info">
-                  💡 <b>Shuru karo:</b> Pehle <b>➕ Token</b> dabao aur Railway ka{' '}
-                  <b>Account Token</b> ya <b>My Projects Token</b> add karo.
+                  💡 <b>Shuru karo:</b> Pehle <b>➕ Token</b> dabao aur Railway ka token
+                  add karo. Phir <b>🧪 Test</b> dabao — agar token sahi hai toh{' '}
+                  <b>✅</b> message aayega.
                 </div>
               )}
 
@@ -506,11 +570,32 @@ export default function Home() {
                 </button>
               </div>
 
+              <div className="info">
+                🔑 <b>Token format:</b> Railway ka token UUID jaisa hota hai, jaise
+                <code
+                  style={{
+                    background: '#0a0a0f',
+                    padding: '2px 6px',
+                    borderRadius: '4px',
+                    marginLeft: '4px',
+                    fontSize: '11px',
+                    display: 'inline-block',
+                    marginTop: '4px',
+                  }}
+                >
+                  47d0d096-9d73-4935-9eef-d98fce82cd73
+                </code>
+                <br />
+                <br />
+                <b>Kahan se lo:</b> Railway → Account Settings → Tokens → Create Token
+                → <b>My Projects</b> workspace select karo
+              </div>
+
               {tokens.length === 0 ? (
                 <div className="empty">
                   <div className="empty-icon">🔑</div>
                   <h3>Koi token nahi</h3>
-                  <p>Upar wale button se token add karo</p>
+                  <p>Upar wale button se add karo</p>
                 </div>
               ) : (
                 <div className="list">
@@ -523,9 +608,12 @@ export default function Home() {
                       <div className="token-meta">
                         <span className="chip">Priority {t.priority}</span>
                         <span className="chip chip-blue">{t.type || 'account'}</span>
+                        <span className="chip chip-purple">
+                          {t.token.length} chars
+                        </span>
                       </div>
                       <div className="token-value">
-                        {t.token.substring(0, 12)}...{t.token.slice(-4)}
+                        {t.token.substring(0, 16)}...{t.token.slice(-8)}
                       </div>
                       <button
                         className="btn btn-danger btn-sm"
@@ -544,7 +632,11 @@ export default function Home() {
           {activeTab === 'projects' && (
             <>
               <div className="btn-row">
-                <button className="btn btn-primary" onClick={loadProjects} disabled={loading}>
+                <button
+                  className="btn btn-primary"
+                  onClick={loadProjects}
+                  disabled={loading}
+                >
                   🔄 Refresh
                 </button>
                 <button
@@ -584,7 +676,7 @@ export default function Home() {
           )}
         </main>
 
-        {/* BOTTOM NAV (ANDROID STYLE) */}
+        {/* BOTTOM NAV */}
         <nav className="bottom-nav">
           <button
             className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`}
@@ -611,12 +703,16 @@ export default function Home() {
 
         {/* ============ TOKEN MODAL ============ */}
         {showTokenModal && (
-          <div className="overlay" onClick={(e) => e.target === e.currentTarget && setShowTokenModal(false)}>
+          <div
+            className="overlay"
+            onClick={(e) => e.target === e.currentTarget && setShowTokenModal(false)}
+          >
             <div className="sheet">
               <div className="sheet-handle" />
               <h2>🔑 Naya Token</h2>
               <p className="hint">
-                Railway → Account Settings → Tokens → Create Token
+                Railway → Account Settings → Tokens → Create Token → <b>My Projects</b>{' '}
+                select karo
               </p>
 
               <label>Naam / Email</label>
@@ -627,23 +723,37 @@ export default function Home() {
                 onChange={(e) => setNewToken({ ...newToken, email: e.target.value })}
               />
 
-              <label>Token Type</label>
+              <label>Token Type (info only)</label>
               <select
                 value={newToken.type}
                 onChange={(e) => setNewToken({ ...newToken, type: e.target.value })}
               >
-                <option value="account">👤 Account Token (sab)</option>
+                <option value="account">👤 Account Token</option>
                 <option value="team">👥 My Projects / Workspace</option>
-                <option value="project">📦 Project Token (single)</option>
+                <option value="project">📦 Project Token</option>
               </select>
 
-              <label>Railway Token</label>
+              <label>Railway Token (UUID format)</label>
               <input
-                type="password"
-                placeholder="rw_xxxxx..."
+                type="text"
+                placeholder="47d0d096-9d73-4935-9eef-..."
                 value={newToken.token}
                 onChange={(e) => setNewToken({ ...newToken, token: e.target.value })}
+                autoComplete="off"
+                spellCheck="false"
               />
+              {newToken.token && (
+                <div
+                  style={{
+                    fontSize: '11px',
+                    color: '#9ca3af',
+                    marginTop: '6px',
+                  }}
+                >
+                  Length: {newToken.token.trim().length} chars
+                  {newToken.token.length >= 30 ? ' ✅' : ' ⚠️ (bahut chhota?)'}
+                </div>
+              )}
 
               <label>Priority (1 = highest)</label>
               <input
@@ -654,7 +764,10 @@ export default function Home() {
               />
 
               <div className="sheet-actions">
-                <button className="btn btn-outline" onClick={() => setShowTokenModal(false)}>
+                <button
+                  className="btn btn-outline"
+                  onClick={() => setShowTokenModal(false)}
+                >
                   Cancel
                 </button>
                 <button className="btn btn-success" onClick={addToken}>
@@ -667,7 +780,10 @@ export default function Home() {
 
         {/* ============ PROJECT MODAL ============ */}
         {showProjectModal && (
-          <div className="overlay" onClick={(e) => e.target === e.currentTarget && setShowProjectModal(false)}>
+          <div
+            className="overlay"
+            onClick={(e) => e.target === e.currentTarget && setShowProjectModal(false)}
+          >
             <div className="sheet">
               <div className="sheet-handle" />
               <h2>🚀 Naya Project</h2>
@@ -682,10 +798,17 @@ export default function Home() {
               />
 
               <div className="sheet-actions">
-                <button className="btn btn-outline" onClick={() => setShowProjectModal(false)}>
+                <button
+                  className="btn btn-outline"
+                  onClick={() => setShowProjectModal(false)}
+                >
                   Cancel
                 </button>
-                <button className="btn btn-success" onClick={createProject} disabled={loading}>
+                <button
+                  className="btn btn-success"
+                  onClick={createProject}
+                  disabled={loading}
+                >
                   {loading ? '⏳' : '🚀'} Create
                 </button>
               </div>
@@ -695,7 +818,10 @@ export default function Home() {
 
         {/* ============ VARIABLES MODAL ============ */}
         {showVarsModal && varsContext && (
-          <div className="overlay" onClick={(e) => e.target === e.currentTarget && setShowVarsModal(false)}>
+          <div
+            className="overlay"
+            onClick={(e) => e.target === e.currentTarget && setShowVarsModal(false)}
+          >
             <div className="sheet sheet-large">
               <div className="sheet-handle" />
               <div className="sheet-head">
@@ -772,11 +898,57 @@ export default function Home() {
           </div>
         )}
 
+        {/* ============ DEBUG MODAL ============ */}
+        {showDebugModal && debugData && (
+          <div
+            className="overlay"
+            onClick={(e) => e.target === e.currentTarget && setShowDebugModal(false)}
+          >
+            <div className="sheet sheet-large">
+              <div className="sheet-handle" />
+              <div className="sheet-head">
+                <div>
+                  <h2>🔍 Debug Info</h2>
+                  <p className="hint">Ye info developer ko dikhao</p>
+                </div>
+                <button className="close-btn" onClick={() => setShowDebugModal(false)}>
+                  ✕
+                </button>
+              </div>
+
+              <pre
+                style={{
+                  background: '#0a0a0f',
+                  padding: '14px',
+                  borderRadius: '10px',
+                  fontSize: '11px',
+                  color: '#cbd5e1',
+                  overflow: 'auto',
+                  maxHeight: '400px',
+                  fontFamily: 'monospace',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                }}
+              >
+                {JSON.stringify(debugData, null, 2)}
+              </pre>
+
+              <button
+                className="btn btn-primary btn-full"
+                style={{ marginTop: '14px' }}
+                onClick={() => {
+                  copyText(JSON.stringify(debugData, null, 2), 'Debug info');
+                }}
+              >
+                📋 Copy Debug Info
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* ============ TOAST ============ */}
         {toast && (
-          <div className={`toast ${toast.isError ? 'err' : ''}`}>
-            {toast.msg}
-          </div>
+          <div className={`toast ${toast.isError ? 'err' : ''}`}>{toast.msg}</div>
         )}
       </div>
 
@@ -801,16 +973,9 @@ export default function Home() {
           border-bottom: 1px solid rgba(42, 42, 74, 0.4);
         }
 
-        .brand {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-        }
+        .brand { display: flex; align-items: center; gap: 12px; }
 
-        .logo {
-          font-size: 28px;
-          filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.5));
-        }
+        .logo { font-size: 28px; filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.5)); }
 
         .header h1 {
           font-size: 18px;
@@ -821,12 +986,7 @@ export default function Home() {
           background-clip: text;
         }
 
-        .status-line {
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          margin-top: 3px;
-        }
+        .status-line { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
 
         .dot {
           width: 8px;
@@ -855,11 +1015,8 @@ export default function Home() {
           max-width: 240px;
         }
 
-        .main {
-          padding: 16px;
-        }
+        .main { padding: 16px; }
 
-        /* ============ STATS ============ */
         .stats-grid {
           display: grid;
           grid-template-columns: repeat(2, 1fr);
@@ -905,7 +1062,6 @@ export default function Home() {
           letter-spacing: 0.5px;
         }
 
-        /* ============ BUTTONS ============ */
         .btn-row {
           display: flex;
           gap: 8px;
@@ -927,13 +1083,8 @@ export default function Home() {
           touch-action: manipulation;
         }
 
-        .btn:active:not(:disabled) {
-          transform: scale(0.96);
-        }
-
-        .btn:disabled {
-          opacity: 0.4;
-        }
+        .btn:active:not(:disabled) { transform: scale(0.96); }
+        .btn:disabled { opacity: 0.4; }
 
         .btn-full { width: 100%; }
 
@@ -949,6 +1100,12 @@ export default function Home() {
           color: #fff;
           box-shadow: 0 4px 15px rgba(34, 197, 94, 0.25);
           flex: 1;
+        }
+
+        .btn-warning {
+          background: linear-gradient(135deg, #f59e0b, #d97706);
+          color: #fff;
+          box-shadow: 0 4px 15px rgba(245, 158, 11, 0.25);
         }
 
         .btn-danger {
@@ -968,7 +1125,6 @@ export default function Home() {
           min-height: 38px;
         }
 
-        /* ============ INFO ============ */
         .info {
           background: rgba(59, 130, 246, 0.08);
           border: 1px solid rgba(59, 130, 246, 0.25);
@@ -980,7 +1136,11 @@ export default function Home() {
           line-height: 1.6;
         }
 
-        /* ============ SEARCH ============ */
+        .info code {
+          color: #fbbf24;
+          word-break: break-all;
+        }
+
         .search {
           width: 100%;
           padding: 14px 16px;
@@ -998,7 +1158,6 @@ export default function Home() {
           box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.15);
         }
 
-        /* ============ PROJECT CARDS ============ */
         .list { display: flex; flex-direction: column; gap: 12px; }
 
         .proj-card {
@@ -1056,20 +1215,9 @@ export default function Home() {
           letter-spacing: 0.4px;
         }
 
-        .chip-green {
-          background: rgba(34, 197, 94, 0.15);
-          color: #22c55e;
-        }
-
-        .chip-blue {
-          background: rgba(59, 130, 246, 0.15);
-          color: #60a5fa;
-        }
-
-        .chip-purple {
-          background: rgba(168, 85, 247, 0.15);
-          color: #a855f7;
-        }
+        .chip-green { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
+        .chip-blue { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+        .chip-purple { background: rgba(168, 85, 247, 0.15); color: #a855f7; }
 
         .proj-meta {
           font-size: 12px;
@@ -1119,7 +1267,6 @@ export default function Home() {
           font-size: 12px;
         }
 
-        /* ============ TOKEN ITEMS ============ */
         .token-item {
           background: linear-gradient(135deg, #12121f, #0f0f1a);
           border: 1px solid #2a2a4a;
@@ -1162,7 +1309,6 @@ export default function Home() {
           word-break: break-all;
         }
 
-        /* ============ EMPTY ============ */
         .empty {
           text-align: center;
           padding: 60px 20px;
@@ -1177,18 +1323,9 @@ export default function Home() {
           opacity: 0.6;
         }
 
-        .empty h3 {
-          font-size: 16px;
-          color: #e5e7eb;
-          margin-bottom: 6px;
-        }
+        .empty h3 { font-size: 16px; color: #e5e7eb; margin-bottom: 6px; }
+        .empty p { font-size: 13px; color: #6b7280; }
 
-        .empty p {
-          font-size: 13px;
-          color: #6b7280;
-        }
-
-        /* ============ BOTTOM NAV ============ */
         .bottom-nav {
           position: fixed;
           bottom: 0;
@@ -1218,9 +1355,7 @@ export default function Home() {
           position: relative;
         }
 
-        .nav-item.active {
-          color: #a855f7;
-        }
+        .nav-item.active { color: #a855f7; }
 
         .nav-item.active::before {
           content: '';
@@ -1234,21 +1369,10 @@ export default function Home() {
           border-radius: 0 0 3px 3px;
         }
 
-        .nav-item:active {
-          transform: scale(0.92);
-        }
+        .nav-item:active { transform: scale(0.92); }
+        .nav-icon { font-size: 22px; line-height: 1; }
+        .nav-label { text-transform: uppercase; letter-spacing: 0.5px; }
 
-        .nav-icon {
-          font-size: 22px;
-          line-height: 1;
-        }
-
-        .nav-label {
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-        }
-
-        /* ============ MODAL SHEET (ANDROID STYLE) ============ */
         .overlay {
           position: fixed;
           inset: 0;
@@ -1262,10 +1386,7 @@ export default function Home() {
           animation: fadeIn 0.2s;
         }
 
-        @keyframes fadeIn {
-          from { opacity: 0; }
-          to { opacity: 1; }
-        }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
         .sheet {
           background: #12121f;
@@ -1279,9 +1400,7 @@ export default function Home() {
           padding-bottom: calc(30px + env(safe-area-inset-bottom));
         }
 
-        .sheet-large {
-          max-height: 85vh;
-        }
+        .sheet-large { max-height: 85vh; }
 
         @keyframes slideUp {
           from { transform: translateY(100%); }
@@ -1354,9 +1473,7 @@ export default function Home() {
           margin-top: 24px;
         }
 
-        .sheet-actions .btn {
-          flex: 1;
-        }
+        .sheet-actions .btn { flex: 1; }
 
         .close-btn {
           background: rgba(239, 68, 68, 0.15);
@@ -1371,7 +1488,6 @@ export default function Home() {
           font-weight: 700;
         }
 
-        /* ============ VARIABLES ============ */
         .var-add {
           display: flex;
           gap: 8px;
@@ -1390,29 +1506,17 @@ export default function Home() {
           font-size: 14px;
         }
 
-        .var-add input:focus {
-          outline: none;
-          border-color: #a855f7;
-        }
+        .var-add input:focus { outline: none; border-color: #a855f7; }
+        .var-add .btn { min-width: 44px; padding: 12px; }
 
-        .var-add .btn {
-          min-width: 44px;
-          padding: 12px;
-        }
-
-        .vars-load,
-        .vars-empty {
+        .vars-load, .vars-empty {
           text-align: center;
           padding: 40px 20px;
           color: #6b7280;
           font-size: 14px;
         }
 
-        .vars-list {
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        }
+        .vars-list { display: flex; flex-direction: column; gap: 8px; }
 
         .var-item {
           background: #0a0a0f;
@@ -1445,16 +1549,9 @@ export default function Home() {
           border-radius: 4px;
         }
 
-        .var-val .mask {
-          color: #4b5563;
-          letter-spacing: 2px;
-        }
+        .var-val .mask { color: #4b5563; letter-spacing: 2px; }
 
-        .var-btns {
-          display: flex;
-          gap: 6px;
-          justify-content: flex-end;
-        }
+        .var-btns { display: flex; gap: 6px; justify-content: flex-end; }
 
         .icon-btn {
           width: 38px;
@@ -1473,7 +1570,6 @@ export default function Home() {
           background: rgba(168, 85, 247, 0.2);
         }
 
-        /* ============ TOAST ============ */
         .toast {
           position: fixed;
           bottom: 88px;
@@ -1492,45 +1588,23 @@ export default function Home() {
           word-break: break-word;
           max-width: 500px;
           margin: 0 auto;
+          white-space: pre-line;
         }
 
-        .toast.err {
-          border-color: #ef4444;
-        }
+        .toast.err { border-color: #ef4444; }
 
         @keyframes toastIn {
-          from {
-            transform: translateY(100px);
-            opacity: 0;
-          }
-          to {
-            transform: translateY(0);
-            opacity: 1;
-          }
+          from { transform: translateY(100px); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
         }
 
-        /* ============ DESKTOP ============ */
         @media (min-width: 768px) {
-          .stats-grid {
-            grid-template-columns: repeat(4, 1fr);
-          }
-          .list {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-          }
-          .btn-row .btn {
-            flex: 0 0 auto;
-          }
-          .btn-row .btn:first-child {
-            flex: 1;
-          }
-          .overlay {
-            align-items: center;
-          }
-          .sheet {
-            border-radius: 24px;
-            padding: 20px 30px 30px;
-          }
+          .stats-grid { grid-template-columns: repeat(4, 1fr); }
+          .list { display: grid; grid-template-columns: repeat(2, 1fr); }
+          .btn-row .btn { flex: 0 0 auto; }
+          .btn-row .btn:first-child { flex: 1; }
+          .overlay { align-items: center; }
+          .sheet { border-radius: 24px; padding: 20px 30px 30px; }
         }
       `}</style>
     </>
@@ -1587,10 +1661,16 @@ function ProjectList({ projects, onCopy, onDelete, onVars }) {
             >
               🔗 Open
             </a>
-            <button className="btn btn-outline" onClick={() => onCopy(p.url, 'Link')}>
+            <button
+              className="btn btn-outline"
+              onClick={() => onCopy(p.url, 'Link')}
+            >
               📋
             </button>
-            <button className="btn btn-danger" onClick={() => onDelete(p.id, p.name)}>
+            <button
+              className="btn btn-danger"
+              onClick={() => onDelete(p.id, p.name)}
+            >
               🗑️
             </button>
           </div>
