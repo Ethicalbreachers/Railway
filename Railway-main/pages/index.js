@@ -3,11 +3,11 @@ import Head from 'next/head';
 
 // ==================== GRAPHQL QUERIES ====================
 const Q = {
-  // Test query — sabse simple
+  // Account-level test
   testMe: `query { me { id name email } }`,
 
-  // Get all projects with services and environments
-  getProjects: `
+  // For Account Token: me.projects
+  getProjectsViaMe: `
     query {
       me {
         id
@@ -33,6 +33,37 @@ const Q = {
                     id
                     name
                   }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `,
+
+  // For Workspace/My Projects Token: direct projects
+  getProjectsDirect: `
+    query {
+      projects {
+        edges {
+          node {
+            id
+            name
+            createdAt
+            services {
+              edges {
+                node {
+                  id
+                  name
+                }
+              }
+            }
+            environments {
+              edges {
+                node {
+                  id
+                  name
                 }
               }
             }
@@ -116,6 +147,7 @@ export default function Home() {
   const [toast, setToast] = useState(null);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [search, setSearch] = useState('');
+  const [detectedTokenType, setDetectedTokenType] = useState(null);
 
   // Modals
   const [showTokenModal, setShowTokenModal] = useState(false);
@@ -128,7 +160,7 @@ export default function Home() {
     email: '',
     token: '',
     priority: 1,
-    type: 'account',
+    type: 'auto',
   });
   const [newProject, setNewProject] = useState({ name: '' });
 
@@ -142,12 +174,12 @@ export default function Home() {
   // ============ LOAD ============
   useEffect(() => {
     try {
-      const t = localStorage.getItem('rw_tokens_v4');
+      const t = localStorage.getItem('rw_tokens_v5');
       if (t) {
         const p = JSON.parse(t);
         if (Array.isArray(p)) setTokens(p);
       }
-      const pr = localStorage.getItem('rw_projects_v4');
+      const pr = localStorage.getItem('rw_projects_v5');
       if (pr) {
         const p = JSON.parse(pr);
         if (Array.isArray(p)) setProjects(p);
@@ -156,12 +188,12 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (tokens.length) localStorage.setItem('rw_tokens_v4', JSON.stringify(tokens));
-    else localStorage.removeItem('rw_tokens_v4');
+    if (tokens.length) localStorage.setItem('rw_tokens_v5', JSON.stringify(tokens));
+    else localStorage.removeItem('rw_tokens_v5');
   }, [tokens]);
 
   useEffect(() => {
-    if (projects.length) localStorage.setItem('rw_projects_v4', JSON.stringify(projects));
+    if (projects.length) localStorage.setItem('rw_projects_v5', JSON.stringify(projects));
   }, [projects]);
 
   const showToast = useCallback((msg, isError = false) => {
@@ -172,7 +204,46 @@ export default function Home() {
   const setStatusText = (text, type = 'ok') => setStatus({ text, type });
 
   // ============ API CALL ============
-  const railwayCall = async (query, variables = {}, opts = {}) => {
+  // Railway call with SINGLE token (for fallback logic)
+  const railwayCallOne = async (query, variables = {}, token) => {
+    const res = await fetch('/api/railway', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query,
+        variables,
+        tokens: [
+          {
+            email: token.email,
+            name: token.name,
+            token: token.token.trim(),
+            type: token.type,
+            priority: 1,
+          },
+        ],
+      }),
+    });
+
+    const data = await res.json();
+
+    if (data.debug) {
+      console.log('🔍 Debug:', data.debug);
+    }
+
+    if (!res.ok) {
+      const errMsg = data.error || 'Unknown error';
+      const details = data.details ? '\n\n' + data.details.join('\n') : '';
+      const err = new Error(errMsg + details);
+      err.details = data.details;
+      err.debug = data.debug;
+      throw err;
+    }
+
+    return data;
+  };
+
+  // Railway call with ALL tokens (auto-failover)
+  const railwayCall = async (query, variables = {}) => {
     if (tokens.length === 0) throw new Error('Pehle token add karo!');
 
     const res = await fetch('/api/railway', {
@@ -188,13 +259,11 @@ export default function Home() {
           type: t.type,
           priority: t.priority,
         })),
-        testOnly: opts.testOnly || false,
       }),
     });
 
     const data = await res.json();
 
-    // Save debug info
     if (data.debug) {
       setDebugData(data.debug);
       console.log('🔍 Debug:', data.debug);
@@ -212,65 +281,159 @@ export default function Home() {
     return data;
   };
 
-  // ============ TEST TOKEN (NEW) ============
-  const testTokens = async () => {
-    if (tokens.length === 0) return showToast('Pehle token add karo!', true);
-
-    setLoading(true);
-    setStatusText('Testing token...', 'loading');
-
-    try {
-      const result = await railwayCall(Q.testMe, {}, { testOnly: true });
-      const me = result.data?.me;
-
-      showToast(
-        `✅ Token SAHI hai! Account: ${me?.email || 'unknown'}`,
-        false
-      );
-      setStatusText(`✅ Token valid • ${me?.email}`);
-    } catch (err) {
-      showToast('❌ ' + err.message.split('\n')[0], true);
-      setStatusText('❌ Token galat', 'error');
-      setShowDebugModal(true);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // ============ LOAD PROJECTS ============
+  // ============ SMART PROJECT LOADER ============
+  // Tries me.projects first (account token), then projects direct (workspace token)
   const loadProjects = async () => {
     if (tokens.length === 0) return showToast('Pehle token add karo!', true);
     setLoading(true);
     setStatusText('Loading...', 'loading');
 
-    try {
-      const result = await railwayCall(Q.getProjects);
-      const me = result.data?.me;
-      if (!me) throw new Error('Railway se data nahi mila');
+    const sorted = [...tokens].sort(
+      (a, b) => (a.priority || 99) - (b.priority || 99)
+    );
 
-      const list = me.projects.edges.map((e) => ({
-        id: e.node.id,
-        name: e.node.name,
-        createdAt: e.node.createdAt,
-        services: e.node.services.edges.map((s) => s.node),
-        environments: e.node.environments?.edges.map((en) => en.node) || [],
-        url: `https://${e.node.name}.up.railway.app`,
-        account: result.usedAccount?.email,
-      }));
+    const errors = [];
+    const debugLog = [];
 
-      setProjects(list);
-      setStatusText(`Ready • ${me.email} • ${list.length} projects`);
-      showToast(`✅ ${list.length} projects loaded`);
-    } catch (err) {
-      setStatusText('Error', 'error');
-      showToast('❌ ' + err.message.split('\n')[0], true);
-      setShowDebugModal(true);
-    } finally {
-      setLoading(false);
+    for (const token of sorted) {
+      // ===== ATTEMPT 1: me.projects (Account token) =====
+      try {
+        const result = await railwayCallOne(Q.getProjectsViaMe, {}, token);
+        const edges = result.data?.me?.projects?.edges || [];
+        const email = result.data?.me?.email || token.email;
+
+        const list = edges.map((e) => ({
+          id: e.node.id,
+          name: e.node.name,
+          createdAt: e.node.createdAt,
+          services: e.node.services?.edges?.map((s) => s.node) || [],
+          environments: e.node.environments?.edges?.map((en) => en.node) || [],
+          url: `https://${e.node.name}.up.railway.app`,
+          account: email,
+        }));
+
+        setProjects(list);
+        setDetectedTokenType('account');
+        setStatusText(`✅ Account • ${email} • ${list.length} projects`);
+        showToast(`✅ ${list.length} projects loaded (Account Token)`);
+        setLoading(false);
+        return;
+      } catch (err1) {
+        debugLog.push({
+          account: token.email,
+          attempt: 'me.projects',
+          error: err1.message.split('\n')[0],
+        });
+      }
+
+      // ===== ATTEMPT 2: projects direct (Workspace token) =====
+      try {
+        const result = await railwayCallOne(Q.getProjectsDirect, {}, token);
+        const edges = result.data?.projects?.edges || [];
+
+        const list = edges.map((e) => ({
+          id: e.node.id,
+          name: e.node.name,
+          createdAt: e.node.createdAt,
+          services: e.node.services?.edges?.map((s) => s.node) || [],
+          environments: e.node.environments?.edges?.map((en) => en.node) || [],
+          url: `https://${e.node.name}.up.railway.app`,
+          account: token.email,
+        }));
+
+        setProjects(list);
+        setDetectedTokenType('workspace');
+        setStatusText(`✅ Workspace • ${token.email} • ${list.length} projects`);
+        showToast(`✅ ${list.length} projects loaded (Workspace Token)`);
+        setLoading(false);
+        return;
+      } catch (err2) {
+        debugLog.push({
+          account: token.email,
+          attempt: 'projects',
+          error: err2.message.split('\n')[0],
+        });
+        errors.push(`[${token.email}] ${err2.message.split('\n')[0]}`);
+      }
     }
+
+    // Sab fail
+    setStatusText('❌ Saare tokens fail', 'error');
+    showToast('❌ Koi token kaam nahi kiya', true);
+    setDebugData(debugLog);
+    setShowDebugModal(true);
+    setLoading(false);
   };
 
-  // ============ TOKENS ============
+  // ============ TEST TOKEN ============
+  const testTokens = async () => {
+    if (tokens.length === 0) return showToast('Pehle token add karo!', true);
+
+    setLoading(true);
+    setStatusText('Testing...', 'loading');
+
+    const results = [];
+
+    for (const token of tokens.sort((a, b) => a.priority - b.priority)) {
+      // Test me query
+      try {
+        const r1 = await railwayCallOne(Q.testMe, {}, token);
+        if (r1.data?.me) {
+          results.push({
+            email: token.email,
+            type: 'account',
+            status: '✅ Account Token (full access)',
+            detail: `Email: ${r1.data.me.email}, Name: ${r1.data.me.name || 'N/A'}`,
+          });
+          continue;
+        }
+      } catch (e) {
+        results.push({
+          email: token.email,
+          type: 'account',
+          status: '❌ me query fail',
+          detail: e.message.split('\n')[0],
+        });
+      }
+
+      // Test projects direct
+      try {
+        const r2 = await railwayCallOne(Q.getProjectsDirect, {}, token);
+        if (r2.data?.projects) {
+          results.push({
+            email: token.email,
+            type: 'workspace',
+            status: '✅ Workspace Token (projects access)',
+            detail: `${r2.data.projects.edges.length} projects available`,
+          });
+          continue;
+        }
+      } catch (e) {
+        results.push({
+          email: token.email,
+          type: 'workspace',
+          status: '❌ projects query fail',
+          detail: e.message.split('\n')[0],
+        });
+      }
+    }
+
+    const success = results.find((r) => r.type !== 'fail' && r.status.includes('✅'));
+
+    if (success) {
+      showToast(`✅ ${success.status}`);
+      setStatusText(`✅ ${success.status}`);
+    } else {
+      showToast('❌ Sab tokens fail', true);
+      setStatusText('❌ Token galat', 'error');
+    }
+
+    setDebugData(results);
+    setShowDebugModal(true);
+    setLoading(false);
+  };
+
+  // ============ TOKENS CRUD ============
   const addToken = () => {
     const { email, token, priority, type } = newToken;
     const trimmedToken = token.trim();
@@ -280,11 +443,11 @@ export default function Home() {
     }
 
     if (trimmedToken.length < 20) {
-      return showToast('Token bahut chhota hai — poora copy karo!', true);
+      return showToast('Token bahut chhota hai!', true);
     }
 
     if (/\s/.test(trimmedToken)) {
-      return showToast('Token me space hai — saaf karo!', true);
+      return showToast('Token me space hai!', true);
     }
 
     const newT = {
@@ -293,20 +456,20 @@ export default function Home() {
       name: email.trim(),
       token: trimmedToken,
       priority: parseInt(priority) || tokens.length + 1,
-      type: type || 'account',
+      type: type || 'auto',
       addedAt: new Date().toISOString(),
     };
 
     setTokens([...tokens, newT].sort((a, b) => a.priority - b.priority));
-    setNewToken({ email: '', token: '', priority: tokens.length + 2, type: 'account' });
+    setNewToken({ email: '', token: '', priority: tokens.length + 2, type: 'auto' });
     setShowTokenModal(false);
-    showToast('✅ Token add ho gaya! Ab "Test Token" dabao.');
+    showToast('✅ Token add ho gaya! Ab "Test" dabao.');
   };
 
   const deleteToken = (id) => {
     if (!confirm('Ye token delete karna hai?')) return;
     setTokens(tokens.filter((t) => t.id !== id));
-    showToast('🗑️ Token delete ho gaya');
+    showToast('🗑️ Token delete');
   };
 
   // ============ PROJECT CRUD ============
@@ -321,7 +484,7 @@ export default function Home() {
     setStatusText('Creating...', 'loading');
     try {
       await railwayCall(Q.createProject, { name });
-      showToast('🚀 Project create ho gaya!');
+      showToast('🚀 Project create!');
       setNewProject({ name: '' });
       setShowProjectModal(false);
       await loadProjects();
@@ -337,7 +500,7 @@ export default function Home() {
     setLoading(true);
     try {
       await railwayCall(Q.deleteProject, { id });
-      showToast('🗑️ Project delete ho gaya');
+      showToast('🗑️ Project delete');
       await loadProjects();
     } catch (err) {
       showToast('❌ ' + err.message.split('\n')[0], true);
@@ -390,7 +553,7 @@ export default function Home() {
         name: newVar.name,
         value: newVar.value,
       });
-      showToast('✅ Variable save ho gaya!');
+      showToast('✅ Variable save!');
       setNewVar({ name: '', value: '' });
       await loadVars(
         varsContext.project.id,
@@ -461,7 +624,6 @@ export default function Home() {
       </Head>
 
       <div className="app">
-        {/* HEADER */}
         <header className="header">
           <div className="brand">
             <span className="logo">🚂</span>
@@ -475,7 +637,6 @@ export default function Home() {
           </div>
         </header>
 
-        {/* MAIN */}
         <main className="main">
           {/* ============ DASHBOARD ============ */}
           {activeTab === 'dashboard' && (
@@ -498,6 +659,28 @@ export default function Home() {
                   <div className="lbl">Aaj</div>
                 </div>
               </div>
+
+              {detectedTokenType && (
+                <div
+                  className="info"
+                  style={{
+                    background:
+                      detectedTokenType === 'account'
+                        ? 'rgba(34,197,94,0.08)'
+                        : 'rgba(168,85,247,0.08)',
+                    borderColor:
+                      detectedTokenType === 'account'
+                        ? 'rgba(34,197,94,0.25)'
+                        : 'rgba(168,85,247,0.25)',
+                    color:
+                      detectedTokenType === 'account' ? '#86efac' : '#d8b4fe',
+                  }}
+                >
+                  {detectedTokenType === 'account'
+                    ? '👤 Account Token detected — Full access'
+                    : '👥 Workspace Token detected — Projects access'}
+                </div>
+              )}
 
               <div className="btn-row">
                 <button
@@ -525,8 +708,8 @@ export default function Home() {
               {tokens.length === 0 && (
                 <div className="info">
                   💡 <b>Shuru karo:</b> Pehle <b>➕ Token</b> dabao aur Railway ka token
-                  add karo. Phir <b>🧪 Test</b> dabao — agar token sahi hai toh{' '}
-                  <b>✅</b> message aayega.
+                  add karo. <b>Account Token</b> ya <b>My Projects Token</b> — dono
+                  chalenge!
                 </div>
               )}
 
@@ -552,7 +735,7 @@ export default function Home() {
                 <div className="empty">
                   <div className="empty-icon">📦</div>
                   <h3>Koi project nahi</h3>
-                  <p>Refresh dabao ya naya project banao</p>
+                  <p>Refresh dabao ya 🧪 Test se check karo</p>
                 </div>
               )}
             </>
@@ -571,24 +754,17 @@ export default function Home() {
               </div>
 
               <div className="info">
-                🔑 <b>Token format:</b> Railway ka token UUID jaisa hota hai, jaise
-                <code
-                  style={{
-                    background: '#0a0a0f',
-                    padding: '2px 6px',
-                    borderRadius: '4px',
-                    marginLeft: '4px',
-                    fontSize: '11px',
-                    display: 'inline-block',
-                    marginTop: '4px',
-                  }}
-                >
-                  47d0d096-9d73-4935-9eef-d98fce82cd73
-                </code>
+                🔑 <b>Token kahan se lo:</b>
                 <br />
+                1. Railway → Account Settings → Tokens
                 <br />
-                <b>Kahan se lo:</b> Railway → Account Settings → Tokens → Create Token
-                → <b>My Projects</b> workspace select karo
+                2. <b>Create Token</b> dabao
+                <br />
+                3. <b>No workspace</b> (Account) ya <b>My Projects</b> (Workspace) select
+                karo
+                <br />
+                4. Token copy karo (UUID format, jaise
+                <code style={{ fontSize: '10px' }}>47d0d096-9d73-...</code>)
               </div>
 
               {tokens.length === 0 ? (
@@ -607,7 +783,7 @@ export default function Home() {
                       </div>
                       <div className="token-meta">
                         <span className="chip">Priority {t.priority}</span>
-                        <span className="chip chip-blue">{t.type || 'account'}</span>
+                        <span className="chip chip-blue">{t.type || 'auto'}</span>
                         <span className="chip chip-purple">
                           {t.token.length} chars
                         </span>
@@ -676,7 +852,6 @@ export default function Home() {
           )}
         </main>
 
-        {/* BOTTOM NAV */}
         <nav className="bottom-nav">
           <button
             className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`}
@@ -711,8 +886,11 @@ export default function Home() {
               <div className="sheet-handle" />
               <h2>🔑 Naya Token</h2>
               <p className="hint">
-                Railway → Account Settings → Tokens → Create Token → <b>My Projects</b>{' '}
-                select karo
+                Railway → Account Settings → Tokens → Create Token
+                <br />
+                <b>No workspace</b> = Account Token (sab kuch)
+                <br />
+                <b>My Projects</b> = Workspace Token (sirf projects)
               </p>
 
               <label>Naam / Email</label>
@@ -723,17 +901,17 @@ export default function Home() {
                 onChange={(e) => setNewToken({ ...newToken, email: e.target.value })}
               />
 
-              <label>Token Type (info only)</label>
+              <label>Token Type (auto-detect)</label>
               <select
                 value={newToken.type}
                 onChange={(e) => setNewToken({ ...newToken, type: e.target.value })}
               >
+                <option value="auto">🔄 Auto-detect (recommended)</option>
                 <option value="account">👤 Account Token</option>
-                <option value="team">👥 My Projects / Workspace</option>
-                <option value="project">📦 Project Token</option>
+                <option value="workspace">👥 My Projects / Workspace</option>
               </select>
 
-              <label>Railway Token (UUID format)</label>
+              <label>Railway Token (UUID)</label>
               <input
                 type="text"
                 placeholder="47d0d096-9d73-4935-9eef-..."
@@ -975,7 +1153,10 @@ export default function Home() {
 
         .brand { display: flex; align-items: center; gap: 12px; }
 
-        .logo { font-size: 28px; filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.5)); }
+        .logo {
+          font-size: 28px;
+          filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.5));
+        }
 
         .header h1 {
           font-size: 18px;
@@ -1081,10 +1262,12 @@ export default function Home() {
           gap: 6px;
           min-height: 44px;
           touch-action: manipulation;
+          cursor: pointer;
+          border: none;
         }
 
         .btn:active:not(:disabled) { transform: scale(0.96); }
-        .btn:disabled { opacity: 0.4; }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
         .btn-full { width: 100%; }
 
@@ -1139,6 +1322,9 @@ export default function Home() {
         .info code {
           color: #fbbf24;
           word-break: break-all;
+          background: #0a0a0f;
+          padding: 2px 6px;
+          border-radius: 4px;
         }
 
         .search {
@@ -1353,6 +1539,9 @@ export default function Home() {
           font-size: 10px;
           font-weight: 600;
           position: relative;
+          background: none;
+          border: none;
+          cursor: pointer;
         }
 
         .nav-item.active { color: #a855f7; }
@@ -1486,6 +1675,8 @@ export default function Home() {
           align-items: center;
           justify-content: center;
           font-weight: 700;
+          cursor: pointer;
+          border: none;
         }
 
         .var-add {
@@ -1563,6 +1754,9 @@ export default function Home() {
           align-items: center;
           justify-content: center;
           transition: all 0.15s;
+          cursor: pointer;
+          border: none;
+          color: inherit;
         }
 
         .icon-btn:active {
