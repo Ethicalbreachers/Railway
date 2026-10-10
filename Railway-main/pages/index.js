@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Head from 'next/head';
-
-let JSZipLib = null;
+import JSZip from 'jszip';
 
 // ==================== GRAPHQL QUERIES ====================
 const Q = {
@@ -139,7 +138,7 @@ export default function Home() {
   const [githubRepos, setGithubRepos] = useState([]);
   const [reposLoading, setReposLoading] = useState(false);
   const [repoSearch, setRepoSearch] = useState('');
-  const [repoFilter, setRepoFilter] = useState('all'); // all, public, private
+  const [repoFilter, setRepoFilter] = useState('all');
 
   // Modals
   const [showTokenModal, setShowTokenModal] = useState(false);
@@ -154,48 +153,40 @@ export default function Home() {
   const [showUsageModal, setShowUsageModal] = useState(false);
   const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [showRepoDeployModal, setShowRepoDeployModal] = useState(false);
-  const [showRepoFilesModal, setShowRepoFilesModal] = useState(false);
 
   const [debugData, setDebugData] = useState(null);
   const [usageData, setUsageData] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
 
-  // Selected repo for deploy
+  // Selected repo
   const [selectedRepo, setSelectedRepo] = useState(null);
   const [repoBranches, setRepoBranches] = useState([]);
   const [repoFiles, setRepoFiles] = useState([]);
   const [repoDeployConfig, setRepoDeployConfig] = useState({
-    projectName: '',
-    branch: '',
-    serviceName: 'web',
+    projectName: '', branch: '', serviceName: 'web',
     envVars: [{ key: '', value: '' }],
   });
 
-  // Token
   const [newToken, setNewToken] = useState({
     email: '', token: '', priority: 1, type: 'auto',
   });
 
   const [newProject, setNewProject] = useState({ name: '' });
 
-  // GitHub Token
   const [githubToken, setGithubToken] = useState('');
   const [githubUser, setGithubUser] = useState(null);
 
-  // GitHub Deploy (manual URL)
   const [githubDeploy, setGithubDeploy] = useState({
     projectName: '', repoUrl: '', branch: 'main', serviceName: 'web',
     envVars: [{ key: '', value: '' }],
   });
 
-  // ZIP Upload
   const [zipDeploy, setZipDeploy] = useState({
     projectName: '', serviceName: 'web', zipFile: null,
     envVars: [{ key: '', value: '' }],
   });
   const zipInputRef = useRef(null);
 
-  // Code Editor
   const [codeEditor, setCodeEditor] = useState({
     repoName: '', branch: 'main',
     files: [{ path: 'index.html', content: '' }],
@@ -206,7 +197,6 @@ export default function Home() {
   const [deploySteps, setDeploySteps] = useState([]);
   const [deploying, setDeploying] = useState(false);
 
-  // Variables
   const [varsContext, setVarsContext] = useState(null);
   const [vars, setVars] = useState({});
   const [varsLoading, setVarsLoading] = useState(false);
@@ -216,38 +206,27 @@ export default function Home() {
   // ============ LOAD ============
   useEffect(() => {
     try {
-      const t = localStorage.getItem('rw_tokens_v8');
+      const t = localStorage.getItem('rw_tokens_v9');
       if (t) { const p = JSON.parse(t); if (Array.isArray(p)) setTokens(p); }
-      const pr = localStorage.getItem('rw_projects_v8');
+      const pr = localStorage.getItem('rw_projects_v9');
       if (pr) { const p = JSON.parse(pr); if (Array.isArray(p)) setProjects(p); }
-      const gh = localStorage.getItem('rw_github_settings_v8');
+      const gh = localStorage.getItem('rw_github_settings_v9');
       if (gh) { const p = JSON.parse(gh); if (p.githubToken) setGithubToken(p.githubToken); }
     } catch (e) {}
-
-    if (typeof window !== 'undefined') {
-      import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm')
-        .then((mod) => { JSZipLib = mod.default; })
-        .catch(() => {
-          const script = document.createElement('script');
-          script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
-          script.onload = () => { JSZipLib = window.JSZip; };
-          document.head.appendChild(script);
-        });
-    }
   }, []);
 
   useEffect(() => {
-    if (tokens.length) localStorage.setItem('rw_tokens_v8', JSON.stringify(tokens));
-    else localStorage.removeItem('rw_tokens_v8');
+    if (tokens.length) localStorage.setItem('rw_tokens_v9', JSON.stringify(tokens));
+    else localStorage.removeItem('rw_tokens_v9');
   }, [tokens]);
 
   useEffect(() => {
-    if (projects.length) localStorage.setItem('rw_projects_v8', JSON.stringify(projects));
+    if (projects.length) localStorage.setItem('rw_projects_v9', JSON.stringify(projects));
   }, [projects]);
 
   useEffect(() => {
     if (githubToken) {
-      localStorage.setItem('rw_github_settings_v8', JSON.stringify({ githubToken }));
+      localStorage.setItem('rw_github_settings_v9', JSON.stringify({ githubToken }));
       loadGitHubUser();
       loadGitHubRepos();
     }
@@ -424,10 +403,9 @@ export default function Home() {
     if (!githubToken) return;
     setReposLoading(true);
     try {
-      // Get all repos (paginated)
       const allRepos = [];
       let page = 1;
-      while (page <= 5) { // max 5 pages = 500 repos
+      while (page <= 5) {
         const res = await fetch(
           `https://api.github.com/user/repos?per_page=100&page=${page}&sort=updated&affiliation=owner,collaborator,organization_member`,
           {
@@ -441,7 +419,6 @@ export default function Home() {
         if (repos.length < 100) break;
         page++;
       }
-
       setGithubRepos(allRepos);
       showToast(`✅ ${allRepos.length} GitHub repos loaded`);
     } catch (err) {
@@ -499,13 +476,6 @@ export default function Home() {
     );
   };
 
-  const fileToBase64 = (file) => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result.split(',')[1]);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-
   // ============ OPEN REPO DETAILS ============
   const openRepoDetails = async (repo) => {
     setSelectedRepo(repo);
@@ -518,13 +488,11 @@ export default function Home() {
     setRepoBranches([]);
     setRepoFiles([]);
 
-    // Load branches
     try {
       const branches = await githubRequest(`https://api.github.com/repos/${repo.full_name}/branches?per_page=30`);
       setRepoBranches(branches);
     } catch (e) {}
 
-    // Load root files
     try {
       const contents = await githubRequest(`https://api.github.com/repos/${repo.full_name}/contents/`);
       setRepoFiles(contents);
@@ -604,7 +572,6 @@ export default function Home() {
 
       showToast(`🚀 "${projectName}" created! Railway pe repo connect karo.`);
       await loadProjects();
-
       setSelectedRepo(null);
     } catch (err) {
       addStep(`❌ ${err.message}`, 'error');
@@ -614,7 +581,7 @@ export default function Home() {
     }
   };
 
-  // ============ DEPLOY FROM GITHUB URL (manual) ============
+  // ============ DEPLOY FROM GITHUB URL ============
   const deployFromGitHub = async () => {
     const { projectName, repoUrl, branch, serviceName, envVars } = githubDeploy;
 
@@ -723,20 +690,7 @@ export default function Home() {
     };
 
     try {
-      addStep('Loading ZIP library...');
-      let JSZip = JSZipLib || (typeof window !== 'undefined' && window.JSZip);
-      if (!JSZip) {
-        await new Promise((resolve, reject) => {
-          const s = document.createElement('script');
-          s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
-          s.onload = resolve;
-          s.onerror = reject;
-          document.head.appendChild(s);
-        });
-        JSZip = window.JSZip;
-      }
-      if (!JSZip) throw new Error('ZIP library fail');
-      updateLastStep('done');
+      addStep('Loading ZIP library...', 'done', 'JSZip ready');
 
       addStep(`Reading ZIP: ${zipFile.name}`);
       const arrayBuffer = await zipFile.arrayBuffer();
@@ -1122,7 +1076,6 @@ export default function Home() {
                 <button className="btn btn-info" onClick={loadUsage} disabled={loading || tokens.length === 0}>💰 Usage</button>
               </div>
 
-              {/* DEPLOY CARDS */}
               <div className="deploy-section">
                 <div className="deploy-title">🚀 Deploy Karo</div>
                 <div className="deploy-btns">
@@ -1287,9 +1240,7 @@ export default function Home() {
                       {filteredRepos.map((r) => (
                         <div key={r.id} className="repo-card" onClick={() => openRepoDetails(r)}>
                           <div className="repo-head">
-                            <div className="repo-icon">
-                              {r.private ? '🔒' : '📂'}
-                            </div>
+                            <div className="repo-icon">{r.private ? '🔒' : '📂'}</div>
                             <div className="repo-info">
                               <div className="repo-name">{r.name}</div>
                               <div className="repo-full">{r.full_name}</div>
@@ -1304,9 +1255,7 @@ export default function Home() {
                               🚀 Deploy
                             </button>
                           </div>
-                          {r.description && (
-                            <div className="repo-desc">{r.description}</div>
-                          )}
+                          {r.description && <div className="repo-desc">{r.description}</div>}
                           <div className="repo-meta">
                             {r.language && <span className="chip chip-purple">{r.language}</span>}
                             <span className="chip chip-blue">⭐ {r.stargazers_count}</span>
@@ -1895,8 +1844,6 @@ export default function Home() {
         .usage-card { background: #0a0a0f; border: 1px solid #2a2a4a; border-radius: 12px; padding: 12px; text-align: center; }
         .usage-label { font-size: 10px; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.5px; }
         .usage-value { font-size: 18px; font-weight: 800; color: #a855f7; margin-top: 4px; }
-
-        /* GitHub Repos Styles */
         .github-user-bar { display: flex; align-items: center; gap: 12px; padding: 12px; background: linear-gradient(135deg, #12121f, #0f0f1a); border: 1px solid #2a2a4a; border-radius: 14px; margin-bottom: 16px; }
         .github-avatar { width: 44px; height: 44px; border-radius: 50%; border: 2px solid #a855f7; }
         .github-user-info { flex: 1; }
@@ -1927,7 +1874,6 @@ export default function Home() {
         .repo-files-title { font-size: 12px; color: #9ca3af; margin-bottom: 8px; font-weight: 600; }
         .repo-files-list { display: flex; gap: 6px; flex-wrap: wrap; }
         .repo-file-chip { padding: 4px 10px; background: rgba(42, 42, 74, 0.5); border-radius: 8px; font-size: 11px; color: #cbd5e1; }
-
         .toast { position: fixed; bottom: 88px; left: 16px; right: 16px; padding: 14px 18px; background: #12121f; border-left: 4px solid #22c55e; border-radius: 12px; color: #fff; z-index: 200; font-size: 13px; font-weight: 500; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6); animation: toastIn 0.3s cubic-bezier(0.16, 1, 0.3, 1); word-break: break-word; max-width: 500px; margin: 0 auto; white-space: pre-line; }
         .toast.err { border-color: #ef4444; }
         @keyframes toastIn { from { transform: translateY(100px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
