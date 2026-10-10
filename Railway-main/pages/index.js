@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Head from 'next/head';
 
-// JSZip CDN se load hoga (browser me)
 let JSZipLib = null;
 
 // ==================== GRAPHQL QUERIES ====================
@@ -20,12 +19,8 @@ const Q = {
               id
               name
               createdAt
-              services {
-                edges { node { id name } }
-              }
-              environments {
-                edges { node { id name } }
-              }
+              services { edges { node { id name } } }
+              environments { edges { node { id name } } }
             }
           }
         }
@@ -72,13 +67,7 @@ const Q = {
   `,
 
   upsertVariable: `
-    mutation(
-      $projectId: String!
-      $environmentId: String!
-      $serviceId: String!
-      $name: String!
-      $value: String!
-    ) {
+    mutation($projectId: String!, $environmentId: String!, $serviceId: String!, $name: String!, $value: String!) {
       variableUpsert(
         input: {
           projectId: $projectId
@@ -92,12 +81,7 @@ const Q = {
   `,
 
   deleteVariable: `
-    mutation(
-      $projectId: String!
-      $environmentId: String!
-      $serviceId: String!
-      $name: String!
-    ) {
+    mutation($projectId: String!, $environmentId: String!, $serviceId: String!, $name: String!) {
       variableDelete(
         input: {
           projectId: $projectId
@@ -138,55 +122,6 @@ const Q = {
       }
     }
   `,
-
-  // ===== USAGE QUERIES (naya) =====
-  getUsage: `
-    query {
-      me {
-        id
-        email
-        name
-        subscription {
-          id
-          plan {
-            id
-            name
-          }
-        }
-      }
-    }
-  `,
-
-  // ===== BILLING / USAGE =====
-  // Railway me ek 'usage' endpoint GraphQL pe nahi hai public.
-  // Lekin 'me.projects' se projects count milta hai
-  // aur 'usage' ke liye hum ek estimate laga sakte hain.
-  getProjectsUsage: `
-    query {
-      me {
-        id
-        email
-        name
-        projects {
-          edges {
-            node {
-              id
-              name
-              createdAt
-              services {
-                edges {
-                  node {
-                    id
-                    name
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  `,
 };
 
 // ==================== MAIN COMPONENT ====================
@@ -200,6 +135,12 @@ export default function Home() {
   const [search, setSearch] = useState('');
   const [detectedTokenType, setDetectedTokenType] = useState(null);
 
+  // GitHub Repos
+  const [githubRepos, setGithubRepos] = useState([]);
+  const [reposLoading, setReposLoading] = useState(false);
+  const [repoSearch, setRepoSearch] = useState('');
+  const [repoFilter, setRepoFilter] = useState('all'); // all, public, private
+
   // Modals
   const [showTokenModal, setShowTokenModal] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
@@ -212,24 +153,36 @@ export default function Home() {
   const [showDeployModal, setShowDeployModal] = useState(false);
   const [showUsageModal, setShowUsageModal] = useState(false);
   const [showPreviewModal, setShowPreviewModal] = useState(false);
+  const [showRepoDeployModal, setShowRepoDeployModal] = useState(false);
+  const [showRepoFilesModal, setShowRepoFilesModal] = useState(false);
 
   const [debugData, setDebugData] = useState(null);
   const [usageData, setUsageData] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
+
+  // Selected repo for deploy
+  const [selectedRepo, setSelectedRepo] = useState(null);
+  const [repoBranches, setRepoBranches] = useState([]);
+  const [repoFiles, setRepoFiles] = useState([]);
+  const [repoDeployConfig, setRepoDeployConfig] = useState({
+    projectName: '',
+    branch: '',
+    serviceName: 'web',
+    envVars: [{ key: '', value: '' }],
+  });
 
   // Token
   const [newToken, setNewToken] = useState({
     email: '', token: '', priority: 1, type: 'auto',
   });
 
-  // New Project (empty)
   const [newProject, setNewProject] = useState({ name: '' });
 
-  // GitHub Token (settings)
+  // GitHub Token
   const [githubToken, setGithubToken] = useState('');
   const [githubUser, setGithubUser] = useState(null);
 
-  // GitHub Deploy
+  // GitHub Deploy (manual URL)
   const [githubDeploy, setGithubDeploy] = useState({
     projectName: '', repoUrl: '', branch: 'main', serviceName: 'web',
     envVars: [{ key: '', value: '' }],
@@ -244,8 +197,7 @@ export default function Home() {
 
   // Code Editor
   const [codeEditor, setCodeEditor] = useState({
-    repoName: '',
-    branch: 'main',
+    repoName: '', branch: 'main',
     files: [{ path: 'index.html', content: '' }],
     activeFileIndex: 0,
     isPrivate: false,
@@ -264,23 +216,18 @@ export default function Home() {
   // ============ LOAD ============
   useEffect(() => {
     try {
-      const t = localStorage.getItem('rw_tokens_v7');
+      const t = localStorage.getItem('rw_tokens_v8');
       if (t) { const p = JSON.parse(t); if (Array.isArray(p)) setTokens(p); }
-      const pr = localStorage.getItem('rw_projects_v7');
+      const pr = localStorage.getItem('rw_projects_v8');
       if (pr) { const p = JSON.parse(pr); if (Array.isArray(p)) setProjects(p); }
-      const gh = localStorage.getItem('rw_github_settings_v7');
-      if (gh) {
-        const p = JSON.parse(gh);
-        if (p.githubToken) setGithubToken(p.githubToken);
-      }
+      const gh = localStorage.getItem('rw_github_settings_v8');
+      if (gh) { const p = JSON.parse(gh); if (p.githubToken) setGithubToken(p.githubToken); }
     } catch (e) {}
 
-    // Load JSZip
     if (typeof window !== 'undefined') {
       import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm')
         .then((mod) => { JSZipLib = mod.default; })
         .catch(() => {
-          // Fallback: script tag se load
           const script = document.createElement('script');
           script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
           script.onload = () => { JSZipLib = window.JSZip; };
@@ -290,17 +237,19 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (tokens.length) localStorage.setItem('rw_tokens_v7', JSON.stringify(tokens));
-    else localStorage.removeItem('rw_tokens_v7');
+    if (tokens.length) localStorage.setItem('rw_tokens_v8', JSON.stringify(tokens));
+    else localStorage.removeItem('rw_tokens_v8');
   }, [tokens]);
 
   useEffect(() => {
-    if (projects.length) localStorage.setItem('rw_projects_v7', JSON.stringify(projects));
+    if (projects.length) localStorage.setItem('rw_projects_v8', JSON.stringify(projects));
   }, [projects]);
 
   useEffect(() => {
     if (githubToken) {
-      localStorage.setItem('rw_github_settings_v7', JSON.stringify({ githubToken }));
+      localStorage.setItem('rw_github_settings_v8', JSON.stringify({ githubToken }));
+      loadGitHubUser();
+      loadGitHubRepos();
     }
   }, [githubToken]);
 
@@ -412,34 +361,19 @@ export default function Home() {
     setLoading(false);
   };
 
-  // ============ USAGE / BILLING ============
+  // ============ USAGE ============
   const loadUsage = async () => {
     if (tokens.length === 0) return showToast('Pehle token add karo!', true);
     setLoading(true);
     setStatusText('Loading usage...', 'loading');
-
     try {
       const sorted = [...tokens].sort((a, b) => (a.priority || 99) - (b.priority || 99));
       let usageResult = null;
-
       for (const token of sorted) {
         try {
-          // Try to get subscription info
           const sub = await railwayCallOne(`
-            query {
-              me {
-                id
-                email
-                name
-                subscription {
-                  id
-                  plan { id name }
-                  currentPeriodEnd
-                }
-              }
-            }
+            query { me { id email name subscription { id plan { id name } currentPeriodEnd } } }
           `, {}, token);
-
           if (sub.data?.me) {
             usageResult = {
               email: sub.data.me.email,
@@ -452,40 +386,25 @@ export default function Home() {
           }
         } catch (e) {}
       }
-
-      // Projects count
       const projectsCount = projects.length;
       const servicesCount = projects.reduce((s, p) => s + (p.services?.length || 0), 0);
-
-      // Railway free tier: $5/month, 500 hours
-      // Estimate based on plan
       const FREE_CREDIT = 5.00;
       const FREE_HOURS = 500;
-
       const usage = {
-        ...usageResult,
-        projectsCount,
-        servicesCount,
-        freeCredit: FREE_CREDIT,
-        freeHours: FREE_HOURS,
-        // Estimate: agar aapke paas N services hain
-        // Har service ~24 hours/day use karti hai
-        estimatedHoursUsed: Math.min(servicesCount * 24 * 5, FREE_HOURS), // 5 days assumption
-        estimatedCostPerDay: (servicesCount * 0.000231) * 24, // Railway estimate
+        ...usageResult, projectsCount, servicesCount,
+        freeCredit: FREE_CREDIT, freeHours: FREE_HOURS,
+        estimatedHoursUsed: Math.min(servicesCount * 24 * 5, FREE_HOURS),
+        estimatedCostPerDay: (servicesCount * 0.000231) * 24,
       };
-
       setUsageData(usage);
       setShowUsageModal(true);
-      setStatusText(`✅ Usage loaded • ${usage.plan}`);
+      setStatusText(`✅ Usage • ${usage.plan}`);
     } catch (err) {
       showToast('❌ ' + err.message.split('\n')[0], true);
-      setStatusText('Error', 'error');
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   };
 
-  // ============ GITHUB USER ============
+  // ============ GITHUB ============
   const loadGitHubUser = async () => {
     if (!githubToken) return null;
     try {
@@ -501,11 +420,37 @@ export default function Home() {
     return null;
   };
 
-  useEffect(() => {
-    if (githubToken) loadGitHubUser();
-  }, [githubToken]);
+  const loadGitHubRepos = async () => {
+    if (!githubToken) return;
+    setReposLoading(true);
+    try {
+      // Get all repos (paginated)
+      const allRepos = [];
+      let page = 1;
+      while (page <= 5) { // max 5 pages = 500 repos
+        const res = await fetch(
+          `https://api.github.com/user/repos?per_page=100&page=${page}&sort=updated&affiliation=owner,collaborator,organization_member`,
+          {
+            headers: { Authorization: `token ${githubToken}`, Accept: 'application/vnd.github.v3+json' },
+          }
+        );
+        if (!res.ok) throw new Error('GitHub repos fetch fail');
+        const repos = await res.json();
+        if (repos.length === 0) break;
+        allRepos.push(...repos);
+        if (repos.length < 100) break;
+        page++;
+      }
 
-  // ============ GITHUB HELPERS ============
+      setGithubRepos(allRepos);
+      showToast(`✅ ${allRepos.length} GitHub repos loaded`);
+    } catch (err) {
+      showToast('❌ ' + err.message, true);
+    } finally {
+      setReposLoading(false);
+    }
+  };
+
   const githubRequest = async (url, options = {}) => {
     if (!githubToken) throw new Error('GitHub token missing');
     const res = await fetch(url, {
@@ -527,17 +472,11 @@ export default function Home() {
   const createGitHubRepo = async (name, isPrivate = false) => {
     return githubRequest('https://api.github.com/user/repos', {
       method: 'POST',
-      body: JSON.stringify({
-        name,
-        private: isPrivate,
-        auto_init: true,
-        description: 'Created via Railway Panel',
-      }),
+      body: JSON.stringify({ name, private: isPrivate, auto_init: true, description: 'Created via Railway Panel' }),
     });
   };
 
   const uploadFileToGitHub = async (repoFullName, path, base64Content, branch, message) => {
-    // Check if file exists
     let sha = null;
     try {
       const existing = await githubRequest(
@@ -560,28 +499,51 @@ export default function Home() {
     );
   };
 
-  const fileToBase64 = (file) =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result.split(',')[1]);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
+  const fileToBase64 = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 
-  // ============ DEPLOY FROM GITHUB ============
-  const deployFromGitHub = async () => {
-    const { projectName, repoUrl, branch, serviceName, envVars } = githubDeploy;
+  // ============ OPEN REPO DETAILS ============
+  const openRepoDetails = async (repo) => {
+    setSelectedRepo(repo);
+    setRepoDeployConfig({
+      projectName: repo.name.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
+      branch: repo.default_branch || 'main',
+      serviceName: 'web',
+      envVars: [{ key: '', value: '' }],
+    });
+    setRepoBranches([]);
+    setRepoFiles([]);
+
+    // Load branches
+    try {
+      const branches = await githubRequest(`https://api.github.com/repos/${repo.full_name}/branches?per_page=30`);
+      setRepoBranches(branches);
+    } catch (e) {}
+
+    // Load root files
+    try {
+      const contents = await githubRequest(`https://api.github.com/repos/${repo.full_name}/contents/`);
+      setRepoFiles(contents);
+    } catch (e) {}
+
+    setShowRepoDeployModal(true);
+  };
+
+  // ============ DEPLOY FROM SELECTED REPO ============
+  const deployFromRepo = async () => {
+    if (!selectedRepo) return;
+    const { projectName, branch, serviceName, envVars } = repoDeployConfig;
 
     if (!projectName.trim()) return showToast('Project naam daalo!', true);
-    if (!/^[a-z0-9-]+$/.test(projectName)) return showToast('Sirf lowercase, numbers, hyphen!', true);
-    if (!repoUrl.trim()) return showToast('GitHub repo URL daalo!', true);
-    if (!/^https?:\/\/(www\.)?github\.com\/[\w-]+\/[\w.-]+\/?$/.test(repoUrl.trim())) {
-      return showToast('Galat GitHub URL! Format: https://github.com/user/repo', true);
-    }
+    if (!/^[a-z0-9-]+$/.test(projectName)) return showToast('Lowercase, numbers, hyphen!', true);
 
     setDeploying(true);
     setDeploySteps([]);
-    setShowGitHubModal(false);
+    setShowRepoDeployModal(false);
     setShowDeployModal(true);
 
     const addStep = (text, status = 'running') => {
@@ -596,6 +558,8 @@ export default function Home() {
     };
 
     try {
+      addStep(`Deploying from: ${selectedRepo.full_name}`, 'done', `Branch: ${branch}`);
+
       addStep(`Creating Railway project "${projectName}"...`);
       const projResult = await railwayCall(Q.createProject, { name: projectName });
       const projectId = projResult.data?.projectCreate?.id;
@@ -616,7 +580,7 @@ export default function Home() {
         serviceId = svcRes.data?.serviceCreate?.id;
         updateLastStep('done', serviceId ? `${serviceId.substring(0, 8)}...` : 'Created');
       } catch (e) {
-        updateLastStep('warn', 'Service manual banana padega');
+        updateLastStep('warn', 'Manual connect karo');
       }
 
       const validVars = envVars.filter((v) => v.key.trim() && v.value.trim());
@@ -634,12 +598,88 @@ export default function Home() {
         updateLastStep('done', `${validVars.length} vars set`);
       }
 
-      addStep(`🔗 GitHub repo connect karo: ${repoUrl}`, 'warn');
-      addStep('✅ Railway project ready!', 'done', 'Dashboard pe jao aur repo connect karo');
+      addStep('✅ Railway project ready!', 'done');
+      addStep(`🔗 Ab Railway pe jao aur repo connect karo:`, 'warn');
+      addStep(`   ${selectedRepo.html_url}`, 'warn', `Branch: ${branch}`);
 
       showToast(`🚀 "${projectName}" created! Railway pe repo connect karo.`);
       await loadProjects();
 
+      setSelectedRepo(null);
+    } catch (err) {
+      addStep(`❌ ${err.message}`, 'error');
+      showToast('❌ ' + err.message.split('\n')[0], true);
+    } finally {
+      setDeploying(false);
+    }
+  };
+
+  // ============ DEPLOY FROM GITHUB URL (manual) ============
+  const deployFromGitHub = async () => {
+    const { projectName, repoUrl, branch, serviceName, envVars } = githubDeploy;
+
+    if (!projectName.trim()) return showToast('Project naam daalo!', true);
+    if (!/^[a-z0-9-]+$/.test(projectName)) return showToast('Lowercase, numbers, hyphen!', true);
+    if (!repoUrl.trim()) return showToast('GitHub URL daalo!', true);
+    if (!/^https?:\/\/(www\.)?github\.com\/[\w-]+\/[\w.-]+\/?$/.test(repoUrl.trim())) {
+      return showToast('Galat GitHub URL!', true);
+    }
+
+    setDeploying(true);
+    setDeploySteps([]);
+    setShowGitHubModal(false);
+    setShowDeployModal(true);
+
+    const addStep = (text, status = 'running') => {
+      setDeploySteps((prev) => [...prev, { text, status, time: new Date().toLocaleTimeString() }]);
+    };
+    const updateLastStep = (status, detail = '') => {
+      setDeploySteps((prev) => {
+        const copy = [...prev];
+        if (copy.length > 0) copy[copy.length - 1] = { ...copy[copy.length - 1], status, detail };
+        return copy;
+      });
+    };
+
+    try {
+      addStep(`Creating project "${projectName}"...`);
+      const projResult = await railwayCall(Q.createProject, { name: projectName });
+      const projectId = projResult.data?.projectCreate?.id;
+      updateLastStep('done');
+
+      addStep('Getting environment...');
+      const projDetails = await railwayCall(Q.getProjectDetails, { id: projectId });
+      const environments = projDetails.data?.project?.environments?.edges || [];
+      const environmentId = environments[0]?.node?.id;
+      updateLastStep('done');
+
+      addStep(`Creating service "${serviceName}"...`);
+      let serviceId = null;
+      try {
+        const svcRes = await railwayCall(Q.createService, { projectId, name: serviceName });
+        serviceId = svcRes.data?.serviceCreate?.id;
+        updateLastStep('done');
+      } catch (e) { updateLastStep('warn'); }
+
+      const validVars = envVars.filter((v) => v.key.trim() && v.value.trim());
+      if (validVars.length > 0 && serviceId) {
+        addStep(`Setting ${validVars.length} vars...`);
+        for (const v of validVars) {
+          try {
+            await railwayCall(Q.upsertVariable, {
+              projectId, environmentId, serviceId,
+              name: v.key.trim().toUpperCase(), value: v.value,
+            });
+          } catch (e) {}
+        }
+        updateLastStep('done');
+      }
+
+      addStep(`🔗 Repo connect karo: ${repoUrl}`, 'warn');
+      addStep('✅ Ready!', 'done');
+
+      showToast(`🚀 "${projectName}" created!`);
+      await loadProjects();
       setGithubDeploy({
         projectName: '', repoUrl: '', branch: 'main', serviceName: 'web',
         envVars: [{ key: '', value: '' }],
@@ -663,8 +703,8 @@ export default function Home() {
 
     if (!projectName.trim()) return showToast('Project naam daalo!', true);
     if (!/^[a-z0-9-]+$/.test(projectName)) return showToast('Lowercase, numbers, hyphen!', true);
-    if (!zipFile) return showToast('ZIP file select karo!', true);
-    if (!githubToken) return showToast('GitHub token chahiye (Settings me)', true);
+    if (!zipFile) return showToast('ZIP select karo!', true);
+    if (!githubToken) return showToast('GitHub token chahiye', true);
 
     setDeploying(true);
     setDeploySteps([]);
@@ -683,14 +723,9 @@ export default function Home() {
     };
 
     try {
-      // 1. Load JSZip
       addStep('Loading ZIP library...');
-      let JSZip = JSZipLib;
-      if (!JSZip && typeof window !== 'undefined') {
-        JSZip = window.JSZip;
-      }
+      let JSZip = JSZipLib || (typeof window !== 'undefined' && window.JSZip);
       if (!JSZip) {
-        // Load dynamically
         await new Promise((resolve, reject) => {
           const s = document.createElement('script');
           s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
@@ -700,83 +735,64 @@ export default function Home() {
         });
         JSZip = window.JSZip;
       }
-      if (!JSZip) throw new Error('ZIP library load fail');
+      if (!JSZip) throw new Error('ZIP library fail');
       updateLastStep('done');
 
-      // 2. Read ZIP
       addStep(`Reading ZIP: ${zipFile.name}`);
       const arrayBuffer = await zipFile.arrayBuffer();
       const zip = await JSZip.loadAsync(arrayBuffer);
       const fileEntries = Object.keys(zip.files).filter((f) => !zip.files[f].dir);
-      updateLastStep('done', `${fileEntries.length} files found`);
+      updateLastStep('done', `${fileEntries.length} files`);
 
-      // 3. Detect root folder (if any)
       const paths = fileEntries.map((p) => p.split('/')[0]);
       const uniqueRoots = [...new Set(paths)];
       let stripRoot = '';
       if (uniqueRoots.length === 1 && fileEntries[0].includes('/')) {
         const rootFolder = uniqueRoots[0];
-        const allUnderRoot = fileEntries.every((f) => f.startsWith(rootFolder + '/'));
-        if (allUnderRoot) stripRoot = rootFolder + '/';
+        if (fileEntries.every((f) => f.startsWith(rootFolder + '/'))) stripRoot = rootFolder + '/';
       }
 
-      // 4. Create GitHub repo
       addStep(`Creating GitHub repo: ${projectName}`);
       const repo = await createGitHubRepo(projectName, false);
       const repoFullName = repo.full_name;
       const branch = repo.default_branch || 'main';
       updateLastStep('done', `github.com/${repoFullName}`);
 
-      // 5. Upload files
       addStep(`Uploading ${fileEntries.length} files...`);
       let uploaded = 0;
       for (const path of fileEntries) {
         let cleanPath = path;
-        if (stripRoot && cleanPath.startsWith(stripRoot)) {
-          cleanPath = cleanPath.substring(stripRoot.length);
-        }
+        if (stripRoot && cleanPath.startsWith(stripRoot)) cleanPath = cleanPath.substring(stripRoot.length);
         if (!cleanPath) continue;
-
         const fileData = zip.files[path];
         const arrayBuf = await fileData.async('arraybuffer');
-        const base64 = btoa(
-          new Uint8Array(arrayBuf).reduce((acc, byte) => acc + String.fromCharCode(byte), '')
-        );
-
+        const base64 = btoa(new Uint8Array(arrayBuf).reduce((acc, byte) => acc + String.fromCharCode(byte), ''));
         try {
           await uploadFileToGitHub(repoFullName, cleanPath, base64, branch, `Add ${cleanPath}`);
           uploaded++;
-        } catch (e) {
-          console.warn('Upload fail:', cleanPath, e.message);
-        }
+        } catch (e) {}
       }
-      updateLastStep('done', `${uploaded}/${fileEntries.length} uploaded`);
+      updateLastStep('done', `${uploaded}/${fileEntries.length}`);
 
-      // 6. Create Railway project
       addStep('Creating Railway project...');
       const projResult = await railwayCall(Q.createProject, { name: projectName });
       const projectId = projResult.data?.projectCreate?.id;
       updateLastStep('done');
 
-      // 7. Get env
       addStep('Getting environment...');
       const projDetails = await railwayCall(Q.getProjectDetails, { id: projectId });
       const environments = projDetails.data?.project?.environments?.edges || [];
       const environmentId = environments[0]?.node?.id;
       updateLastStep('done');
 
-      // 8. Create service
-      addStep(`Creating service...`);
+      addStep('Creating service...');
       let serviceId = null;
       try {
         const svcRes = await railwayCall(Q.createService, { projectId, name: serviceName || 'web' });
         serviceId = svcRes.data?.serviceCreate?.id;
         updateLastStep('done');
-      } catch (e) {
-        updateLastStep('warn', 'Manual');
-      }
+      } catch (e) { updateLastStep('warn'); }
 
-      // 9. Env vars
       const validVars = envVars.filter((v) => v.key.trim() && v.value.trim());
       if (validVars.length > 0 && serviceId) {
         addStep(`Setting ${validVars.length} vars...`);
@@ -784,8 +800,7 @@ export default function Home() {
           try {
             await railwayCall(Q.upsertVariable, {
               projectId, environmentId, serviceId,
-              name: v.key.trim().toUpperCase(),
-              value: v.value,
+              name: v.key.trim().toUpperCase(), value: v.value,
             });
           } catch (e) {}
         }
@@ -793,31 +808,23 @@ export default function Home() {
       }
 
       addStep('✅ Deploy complete!', 'done', `github.com/${repoFullName}`);
-      showToast(`🚀 "${projectName}" uploaded + deployed!`);
+      showToast(`🚀 "${projectName}" deployed!`);
       await loadProjects();
 
-      setZipDeploy({
-        projectName: '', serviceName: 'web', zipFile: null,
-        envVars: [{ key: '', value: '' }],
-      });
+      setZipDeploy({ projectName: '', serviceName: 'web', zipFile: null, envVars: [{ key: '', value: '' }] });
       if (zipInputRef.current) zipInputRef.current.value = '';
     } catch (err) {
       addStep(`❌ ${err.message}`, 'error');
       showToast('❌ ' + err.message.split('\n')[0], true);
-    } finally {
-      setDeploying(false);
-    }
+    } finally { setDeploying(false); }
   };
 
-  // ============ CODE EDITOR → GITHUB → RAILWAY ============
+  // ============ CODE EDITOR ============
   const addEditorFile = () => {
     setCodeEditor((prev) => ({
-      ...prev,
-      files: [...prev.files, { path: '', content: '' }],
-      activeFileIndex: prev.files.length,
+      ...prev, files: [...prev.files, { path: '', content: '' }], activeFileIndex: prev.files.length,
     }));
   };
-
   const removeEditorFile = (index) => {
     setCodeEditor((prev) => {
       const files = prev.files.filter((_, i) => i !== index);
@@ -828,7 +835,6 @@ export default function Home() {
       };
     });
   };
-
   const updateEditorFile = (index, field, value) => {
     setCodeEditor((prev) => {
       const files = [...prev.files];
@@ -838,10 +844,9 @@ export default function Home() {
   };
 
   const deployFromEditor = async () => {
-    const { repoName, branch, files, isPrivate } = codeEditor;
-
+    const { repoName, files, isPrivate } = codeEditor;
     if (!repoName.trim()) return showToast('Repo naam daalo!', true);
-    if (!/^[a-z0-9-_]+$/i.test(repoName)) return showToast('Sirf letters, numbers, -, _ !', true);
+    if (!/^[a-z0-9-_]+$/i.test(repoName)) return showToast('Letters, numbers, -, _ only!', true);
     if (!githubToken) return showToast('GitHub token chahiye', true);
 
     const validFiles = files.filter((f) => f.path.trim() && f.content.trim());
@@ -877,11 +882,9 @@ export default function Home() {
         try {
           await uploadFileToGitHub(repoFullName, f.path.trim(), base64, defaultBranch, `Add ${f.path}`);
           uploaded++;
-        } catch (e) {
-          console.warn('Upload fail:', f.path, e.message);
-        }
+        } catch (e) {}
       }
-      updateLastStep('done', `${uploaded}/${validFiles.length} files`);
+      updateLastStep('done', `${uploaded}/${validFiles.length}`);
 
       addStep('Creating Railway project...');
       const projResult = await railwayCall(Q.createProject, { name: repoName.toLowerCase().replace(/[^a-z0-9-]/g, '-') });
@@ -898,26 +901,17 @@ export default function Home() {
       try {
         await railwayCall(Q.createService, { projectId, name: 'web' });
         updateLastStep('done');
-      } catch (e) {
-        updateLastStep('warn', 'Manual');
-      }
+      } catch (e) { updateLastStep('warn'); }
 
-      addStep('✅ Deploy complete!', 'done', `github.com/${repoFullName}`);
-      showToast(`🚀 "${repoName}" banaya + deploy!`);
+      addStep('✅ Complete!', 'done', `github.com/${repoFullName}`);
+      showToast(`🚀 "${repoName}" deployed!`);
       await loadProjects();
 
-      setCodeEditor({
-        repoName: '', branch: 'main',
-        files: [{ path: 'index.html', content: '' }],
-        activeFileIndex: 0,
-        isPrivate: false,
-      });
+      setCodeEditor({ repoName: '', branch: 'main', files: [{ path: 'index.html', content: '' }], activeFileIndex: 0, isPrivate: false });
     } catch (err) {
       addStep(`❌ ${err.message}`, 'error');
       showToast('❌ ' + err.message.split('\n')[0], true);
-    } finally {
-      setDeploying(false);
-    }
+    } finally { setDeploying(false); }
   };
 
   // ============ TEST TOKEN ============
@@ -925,7 +919,6 @@ export default function Home() {
     if (tokens.length === 0) return showToast('Pehle token add karo!', true);
     setLoading(true);
     setStatusText('Testing...', 'loading');
-
     const results = [];
     for (const token of tokens.sort((a, b) => a.priority - b.priority)) {
       try {
@@ -947,9 +940,7 @@ export default function Home() {
     const success = results.find((r) => r.status.includes('✅'));
     if (success) { showToast(`✅ ${success.status}`); setStatusText(`✅ ${success.status}`); }
     else { showToast('❌ Sab fail', true); setStatusText('❌ Token galat', 'error'); }
-    setDebugData(results);
-    setShowDebugModal(true);
-    setLoading(false);
+    setDebugData(results); setShowDebugModal(true); setLoading(false);
   };
 
   // ============ TOKENS ============
@@ -961,12 +952,9 @@ export default function Home() {
     if (/\s/.test(trimmedToken)) return showToast('Token me space hai!', true);
 
     const newT = {
-      id: 'tok_' + Date.now(),
-      email: email.trim(), name: email.trim(),
-      token: trimmedToken,
-      priority: parseInt(priority) || tokens.length + 1,
-      type: type || 'auto',
-      addedAt: new Date().toISOString(),
+      id: 'tok_' + Date.now(), email: email.trim(), name: email.trim(),
+      token: trimmedToken, priority: parseInt(priority) || tokens.length + 1,
+      type: type || 'auto', addedAt: new Date().toISOString(),
     };
     setTokens([...tokens, newT].sort((a, b) => a.priority - b.priority));
     setNewToken({ email: '', token: '', priority: tokens.length + 2, type: 'auto' });
@@ -992,9 +980,8 @@ export default function Home() {
       setNewProject({ name: '' });
       setShowProjectModal(false);
       await loadProjects();
-    } catch (err) {
-      showToast('❌ ' + err.message.split('\n')[0], true);
-    } finally { setLoading(false); }
+    } catch (err) { showToast('❌ ' + err.message.split('\n')[0], true); }
+    finally { setLoading(false); }
   };
 
   const deleteProject = async (id, name) => {
@@ -1004,9 +991,8 @@ export default function Home() {
       await railwayCall(Q.deleteProject, { id });
       showToast('🗑️');
       await loadProjects();
-    } catch (err) {
-      showToast('❌ ' + err.message.split('\n')[0], true);
-    } finally { setLoading(false); }
+    } catch (err) { showToast('❌ ' + err.message.split('\n')[0], true); }
+    finally { setLoading(false); }
   };
 
   // ============ VARIABLES ============
@@ -1066,11 +1052,21 @@ export default function Home() {
 
   // ============ FILTERS ============
   const filtered = projects.filter((p) => p.name.toLowerCase().includes(search.toLowerCase()));
+  
+  const filteredRepos = githubRepos.filter((r) => {
+    const matchSearch = r.name.toLowerCase().includes(repoSearch.toLowerCase()) ||
+                        (r.description && r.description.toLowerCase().includes(repoSearch.toLowerCase()));
+    const matchFilter = repoFilter === 'all' || 
+                        (repoFilter === 'public' && !r.private) ||
+                        (repoFilter === 'private' && r.private);
+    return matchSearch && matchFilter;
+  });
+
   const stats = {
     tokens: tokens.length,
     projects: projects.length,
     services: projects.reduce((s, p) => s + (p.services?.length || 0), 0),
-    today: projects.filter((p) => new Date(p.createdAt).toDateString() === new Date().toDateString()).length,
+    repos: githubRepos.length,
   };
 
   // ============ RENDER ============
@@ -1094,9 +1090,7 @@ export default function Home() {
               </div>
             </div>
           </div>
-          <button className="settings-btn" onClick={() => setShowSettingsModal(true)} title="Settings">
-            ⚙️
-          </button>
+          <button className="settings-btn" onClick={() => setShowSettingsModal(true)} title="Settings">⚙️</button>
         </header>
 
         <main className="main">
@@ -1107,7 +1101,7 @@ export default function Home() {
                 <div className="stat"><div className="num">{stats.tokens}</div><div className="lbl">Tokens</div></div>
                 <div className="stat"><div className="num">{stats.projects}</div><div className="lbl">Projects</div></div>
                 <div className="stat"><div className="num">{stats.services}</div><div className="lbl">Services</div></div>
-                <div className="stat"><div className="num">{stats.today}</div><div className="lbl">Aaj</div></div>
+                <div className="stat"><div className="num">{stats.repos}</div><div className="lbl">Repos</div></div>
               </div>
 
               {detectedTokenType && (
@@ -1124,22 +1118,25 @@ export default function Home() {
                 <button className="btn btn-primary" onClick={loadProjects} disabled={loading}>
                   {loading ? '⏳' : '🔄'} Refresh
                 </button>
-                <button className="btn btn-warning" onClick={testTokens} disabled={loading || tokens.length === 0}>
-                  🧪 Test
-                </button>
-                <button className="btn btn-info" onClick={loadUsage} disabled={loading || tokens.length === 0}>
-                  💰 Usage
-                </button>
+                <button className="btn btn-warning" onClick={testTokens} disabled={loading || tokens.length === 0}>🧪 Test</button>
+                <button className="btn btn-info" onClick={loadUsage} disabled={loading || tokens.length === 0}>💰 Usage</button>
               </div>
 
               {/* DEPLOY CARDS */}
               <div className="deploy-section">
                 <div className="deploy-title">🚀 Deploy Karo</div>
                 <div className="deploy-btns">
-                  <button className="deploy-card" onClick={() => setShowGitHubModal(true)}>
-                    <span className="deploy-icon">📦</span>
-                    <span className="deploy-name">GitHub Repo</span>
-                    <span className="deploy-desc">URL daalo</span>
+                  <button className="deploy-card" onClick={() => {
+                    if (githubRepos.length === 0) {
+                      showToast('Pehle GitHub token add karo (⚙️)', true);
+                      setShowSettingsModal(true);
+                    } else {
+                      setActiveTab('repos');
+                    }
+                  }}>
+                    <span className="deploy-icon">🐙</span>
+                    <span className="deploy-name">My Repos</span>
+                    <span className="deploy-desc">{githubRepos.length} repos</span>
                   </button>
                   <button className="deploy-card" onClick={() => setShowUploadModal(true)}>
                     <span className="deploy-icon">🗜️</span>
@@ -1225,6 +1222,106 @@ export default function Home() {
               )}
             </>
           )}
+
+          {/* ============ GITHUB REPOS ============ */}
+          {activeTab === 'repos' && (
+            <>
+              {!githubToken ? (
+                <div className="empty">
+                  <div className="empty-icon">🐙</div>
+                  <h3>GitHub Token Chahiye</h3>
+                  <p style={{ marginBottom: '16px' }}>Repos dekhne ke liye GitHub token add karo</p>
+                  <button className="btn btn-primary" onClick={() => setShowSettingsModal(true)}>⚙️ Settings Kholo</button>
+                </div>
+              ) : (
+                <>
+                  <div className="btn-row">
+                    <button className="btn btn-primary" onClick={loadGitHubRepos} disabled={reposLoading}>
+                      {reposLoading ? '⏳' : '🔄'} Repos
+                    </button>
+                    <button className="btn btn-success" onClick={() => { setCodeEditor({ ...codeEditor, repoName: '' }); setShowCodeEditorModal(true); }}>
+                      ➕ New Repo
+                    </button>
+                  </div>
+
+                  {githubUser && (
+                    <div className="github-user-bar">
+                      <img src={githubUser.avatar_url} alt="" className="github-avatar" />
+                      <div className="github-user-info">
+                        <div className="github-user-name">{githubUser.name || githubUser.login}</div>
+                        <div className="github-user-login">@{githubUser.login}</div>
+                      </div>
+                      <div className="github-repo-count">{githubRepos.length} repos</div>
+                    </div>
+                  )}
+
+                  <input
+                    type="text"
+                    className="search"
+                    placeholder="🔍 Repo search..."
+                    value={repoSearch}
+                    onChange={(e) => setRepoSearch(e.target.value)}
+                  />
+
+                  <div className="filter-tabs">
+                    <button className={`filter-tab ${repoFilter === 'all' ? 'active' : ''}`} onClick={() => setRepoFilter('all')}>
+                      All ({githubRepos.length})
+                    </button>
+                    <button className={`filter-tab ${repoFilter === 'public' ? 'active' : ''}`} onClick={() => setRepoFilter('public')}>
+                      🌐 Public ({githubRepos.filter(r => !r.private).length})
+                    </button>
+                    <button className={`filter-tab ${repoFilter === 'private' ? 'active' : ''}`} onClick={() => setRepoFilter('private')}>
+                      🔒 Private ({githubRepos.filter(r => r.private).length})
+                    </button>
+                  </div>
+
+                  {reposLoading ? (
+                    <div className="empty"><div className="empty-icon">⏳</div><h3>Loading repos...</h3></div>
+                  ) : filteredRepos.length === 0 ? (
+                    <div className="empty">
+                      <div className="empty-icon">📭</div>
+                      <h3>Koi repo nahi mila</h3>
+                    </div>
+                  ) : (
+                    <div className="repo-list">
+                      {filteredRepos.map((r) => (
+                        <div key={r.id} className="repo-card" onClick={() => openRepoDetails(r)}>
+                          <div className="repo-head">
+                            <div className="repo-icon">
+                              {r.private ? '🔒' : '📂'}
+                            </div>
+                            <div className="repo-info">
+                              <div className="repo-name">{r.name}</div>
+                              <div className="repo-full">{r.full_name}</div>
+                            </div>
+                            <button
+                              className="btn btn-success btn-sm repo-deploy-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openRepoDetails(r);
+                              }}
+                            >
+                              🚀 Deploy
+                            </button>
+                          </div>
+                          {r.description && (
+                            <div className="repo-desc">{r.description}</div>
+                          )}
+                          <div className="repo-meta">
+                            {r.language && <span className="chip chip-purple">{r.language}</span>}
+                            <span className="chip chip-blue">⭐ {r.stargazers_count}</span>
+                            <span className="chip">🍴 {r.forks_count}</span>
+                            <span className="chip">📅 {new Date(r.updated_at).toLocaleDateString('en-IN')}</span>
+                            {r.private && <span className="chip chip-green">Private</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
         </main>
 
         {/* BOTTOM NAV */}
@@ -1237,6 +1334,9 @@ export default function Home() {
           </button>
           <button className={`nav-item ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => setActiveTab('projects')}>
             <span className="nav-icon">📦</span><span className="nav-label">Projects</span>
+          </button>
+          <button className={`nav-item ${activeTab === 'repos' ? 'active' : ''}`} onClick={() => setActiveTab('repos')}>
+            <span className="nav-icon">🐙</span><span className="nav-label">Repos</span>
           </button>
         </nav>
 
@@ -1280,7 +1380,7 @@ export default function Home() {
               </p>
               {githubUser && (
                 <div className="info" style={{ marginTop: '12px' }}>
-                  ✅ Connected as <b>{githubUser.login}</b>
+                  ✅ Connected: <b>{githubUser.login}</b> • {githubRepos.length} repos
                 </div>
               )}
               <div className="sheet-actions">
@@ -1290,46 +1390,139 @@ export default function Home() {
           </div>
         )}
 
-        {/* ============ GITHUB DEPLOY MODAL ============ */}
-        {showGitHubModal && (
-          <div className="overlay" onClick={(e) => e.target === e.currentTarget && setShowGitHubModal(false)}>
+        {/* ============ REPO DEPLOY MODAL ============ */}
+        {showRepoDeployModal && selectedRepo && (
+          <div className="overlay" onClick={(e) => e.target === e.currentTarget && setShowRepoDeployModal(false)}>
             <div className="sheet sheet-large">
               <div className="sheet-handle" />
               <div className="sheet-head">
-                <div><h2>📦 Deploy from GitHub</h2><p className="hint">Repo URL daalo</p></div>
-                <button className="close-btn" onClick={() => setShowGitHubModal(false)}>✕</button>
+                <div>
+                  <h2>🚀 Deploy Repo</h2>
+                  <p className="hint">{selectedRepo.full_name}</p>
+                </div>
+                <button className="close-btn" onClick={() => setShowRepoDeployModal(false)}>✕</button>
               </div>
+
+              <div className="repo-detail-card">
+                <div className="repo-detail-row">
+                  <span className="repo-detail-label">Repo:</span>
+                  <span className="repo-detail-val">{selectedRepo.name}</span>
+                </div>
+                <div className="repo-detail-row">
+                  <span className="repo-detail-label">Owner:</span>
+                  <span className="repo-detail-val">{selectedRepo.owner.login}</span>
+                </div>
+                <div className="repo-detail-row">
+                  <span className="repo-detail-label">Visibility:</span>
+                  <span className="repo-detail-val">{selectedRepo.private ? '🔒 Private' : '🌐 Public'}</span>
+                </div>
+                {selectedRepo.language && (
+                  <div className="repo-detail-row">
+                    <span className="repo-detail-label">Language:</span>
+                    <span className="repo-detail-val">{selectedRepo.language}</span>
+                  </div>
+                )}
+                <div className="repo-detail-row">
+                  <span className="repo-detail-label">Updated:</span>
+                  <span className="repo-detail-val">{new Date(selectedRepo.updated_at).toLocaleDateString('en-IN')}</span>
+                </div>
+              </div>
+
+              {repoFiles.length > 0 && (
+                <div className="repo-files-preview">
+                  <div className="repo-files-title">📁 Root Files ({repoFiles.length})</div>
+                  <div className="repo-files-list">
+                    {repoFiles.slice(0, 8).map((f, i) => (
+                      <span key={i} className="repo-file-chip">
+                        {f.type === 'dir' ? '📁' : '📄'} {f.name}
+                      </span>
+                    ))}
+                    {repoFiles.length > 8 && (
+                      <span className="repo-file-chip">+{repoFiles.length - 8} more</span>
+                    )}
+                  </div>
+                </div>
+              )}
+
               <label>Project Name *</label>
-              <input type="text" placeholder="my-app" value={githubDeploy.projectName} onChange={(e) => setGithubDeploy({ ...githubDeploy, projectName: e.target.value })} />
-              <label>GitHub Repo URL *</label>
-              <input type="text" placeholder="https://github.com/user/repo" value={githubDeploy.repoUrl} onChange={(e) => setGithubDeploy({ ...githubDeploy, repoUrl: e.target.value })} />
+              <input
+                type="text"
+                placeholder="my-app"
+                value={repoDeployConfig.projectName}
+                onChange={(e) => setRepoDeployConfig({ ...repoDeployConfig, projectName: e.target.value })}
+              />
+
               <label>Branch</label>
-              <input type="text" placeholder="main" value={githubDeploy.branch} onChange={(e) => setGithubDeploy({ ...githubDeploy, branch: e.target.value })} />
+              <select
+                value={repoDeployConfig.branch}
+                onChange={(e) => setRepoDeployConfig({ ...repoDeployConfig, branch: e.target.value })}
+              >
+                {repoBranches.length > 0 ? (
+                  repoBranches.map((b) => (
+                    <option key={b.name} value={b.name}>{b.name}</option>
+                  ))
+                ) : (
+                  <option value={selectedRepo.default_branch || 'main'}>
+                    {selectedRepo.default_branch || 'main'}
+                  </option>
+                )}
+              </select>
+
               <label>Service Name</label>
-              <input type="text" placeholder="web" value={githubDeploy.serviceName} onChange={(e) => setGithubDeploy({ ...githubDeploy, serviceName: e.target.value })} />
-              <label>Env Variables</label>
-              {githubDeploy.envVars.map((env, i) => (
+              <input
+                type="text"
+                placeholder="web"
+                value={repoDeployConfig.serviceName}
+                onChange={(e) => setRepoDeployConfig({ ...repoDeployConfig, serviceName: e.target.value })}
+              />
+
+              <label>Env Variables (optional)</label>
+              {repoDeployConfig.envVars.map((env, i) => (
                 <div key={i} style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
-                  <input type="text" placeholder="KEY" value={env.key} onChange={(e) => {
-                    const copy = [...githubDeploy.envVars];
-                    copy[i] = { ...copy[i], key: e.target.value.toUpperCase() };
-                    setGithubDeploy({ ...githubDeploy, envVars: copy });
-                  }} style={{ flex: 1 }} />
-                  <input type="text" placeholder="value" value={env.value} onChange={(e) => {
-                    const copy = [...githubDeploy.envVars];
-                    copy[i] = { ...copy[i], value: e.target.value };
-                    setGithubDeploy({ ...githubDeploy, envVars: copy });
-                  }} style={{ flex: 1 }} />
-                  <button className="icon-btn" onClick={() => {
-                    const copy = githubDeploy.envVars.filter((_, idx) => idx !== i);
-                    setGithubDeploy({ ...githubDeploy, envVars: copy.length ? copy : [{ key: '', value: '' }] });
-                  }} style={{ width: '44px', flexShrink: 0 }}>🗑️</button>
+                  <input
+                    type="text"
+                    placeholder="KEY"
+                    value={env.key}
+                    onChange={(e) => {
+                      const copy = [...repoDeployConfig.envVars];
+                      copy[i] = { ...copy[i], key: e.target.value.toUpperCase() };
+                      setRepoDeployConfig({ ...repoDeployConfig, envVars: copy });
+                    }}
+                    style={{ flex: 1 }}
+                  />
+                  <input
+                    type="text"
+                    placeholder="value"
+                    value={env.value}
+                    onChange={(e) => {
+                      const copy = [...repoDeployConfig.envVars];
+                      copy[i] = { ...copy[i], value: e.target.value };
+                      setRepoDeployConfig({ ...repoDeployConfig, envVars: copy });
+                    }}
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    className="icon-btn"
+                    onClick={() => {
+                      const copy = repoDeployConfig.envVars.filter((_, idx) => idx !== i);
+                      setRepoDeployConfig({ ...repoDeployConfig, envVars: copy.length ? copy : [{ key: '', value: '' }] });
+                    }}
+                    style={{ width: '44px', flexShrink: 0 }}
+                  >🗑️</button>
                 </div>
               ))}
-              <button className="btn btn-outline btn-sm" onClick={() => setGithubDeploy({ ...githubDeploy, envVars: [...githubDeploy.envVars, { key: '', value: '' }] })}>➕ Add Env</button>
+              <button
+                className="btn btn-outline btn-sm"
+                onClick={() => setRepoDeployConfig({ ...repoDeployConfig, envVars: [...repoDeployConfig.envVars, { key: '', value: '' }] })}
+              >
+                ➕ Add Env
+              </button>
+
               <div className="sheet-actions" style={{ marginTop: '24px' }}>
-                <button className="btn btn-outline" onClick={() => setShowGitHubModal(false)}>Cancel</button>
-                <button className="btn btn-success" onClick={deployFromGitHub} disabled={deploying}>{deploying ? '⏳' : '🚀'} Deploy</button>
+                <button className="btn btn-outline" onClick={() => setShowRepoDeployModal(false)}>Cancel</button>
+                <button className="btn btn-success" onClick={deployFromRepo} disabled={deploying}>
+                  {deploying ? '⏳' : '🚀'} Deploy
+                </button>
               </div>
             </div>
           </div>
@@ -1341,7 +1534,7 @@ export default function Home() {
             <div className="sheet sheet-large">
               <div className="sheet-handle" />
               <div className="sheet-head">
-                <div><h2>🗜️ ZIP Upload</h2><p className="hint">ZIP file GitHub pe upload → Railway deploy</p></div>
+                <div><h2>🗜️ ZIP Upload</h2><p className="hint">ZIP → GitHub → Railway deploy</p></div>
                 <button className="close-btn" onClick={() => setShowUploadModal(false)}>✕</button>
               </div>
               {!githubToken && (
@@ -1397,36 +1590,27 @@ export default function Home() {
                 <div><h2>📝 Code Editor</h2><p className="hint">Files banao, code likho, deploy</p></div>
                 <button className="close-btn" onClick={() => setShowCodeEditorModal(false)}>✕</button>
               </div>
-
               {!githubToken && (
                 <div className="info" style={{ background: 'rgba(239,68,68,0.08)', borderColor: 'rgba(239,68,68,0.25)', color: '#fca5a5' }}>
                   ⚠️ GitHub Token chahiye (⚙️)
                 </div>
               )}
-
               <label>Repo Name *</label>
               <input type="text" placeholder="my-website" value={codeEditor.repoName} onChange={(e) => setCodeEditor({ ...codeEditor, repoName: e.target.value })} />
-
               <label>Private Repo?</label>
               <select value={codeEditor.isPrivate ? 'yes' : 'no'} onChange={(e) => setCodeEditor({ ...codeEditor, isPrivate: e.target.value === 'yes' })}>
                 <option value="no">🌐 Public</option>
                 <option value="yes">🔒 Private</option>
               </select>
-
               <label>Files ({codeEditor.files.length})</label>
               <div className="editor-tabs">
                 {codeEditor.files.map((f, i) => (
-                  <button
-                    key={i}
-                    className={`editor-tab ${i === codeEditor.activeFileIndex ? 'active' : ''}`}
-                    onClick={() => setCodeEditor({ ...codeEditor, activeFileIndex: i })}
-                  >
+                  <button key={i} className={`editor-tab ${i === codeEditor.activeFileIndex ? 'active' : ''}`} onClick={() => setCodeEditor({ ...codeEditor, activeFileIndex: i })}>
                     {f.path || 'untitled'}
                   </button>
                 ))}
                 <button className="editor-tab add" onClick={addEditorFile}>➕</button>
               </div>
-
               <div style={{ marginTop: '10px' }}>
                 <input
                   type="text"
@@ -1439,27 +1623,13 @@ export default function Home() {
                   placeholder="Paste your code here..."
                   value={codeEditor.files[codeEditor.activeFileIndex]?.content || ''}
                   onChange={(e) => updateEditorFile(codeEditor.activeFileIndex, 'content', e.target.value)}
-                  style={{
-                    width: '100%', minHeight: '220px', padding: '12px',
-                    background: '#0a0a0f', border: '1px solid #2a2a4a', borderRadius: '12px',
-                    color: '#fff', fontFamily: 'Courier New, monospace', fontSize: '13px',
-                    resize: 'vertical',
-                  }}
+                  style={{ width: '100%', minHeight: '220px', padding: '12px', background: '#0a0a0f', border: '1px solid #2a2a4a', borderRadius: '12px', color: '#fff', fontFamily: 'Courier New, monospace', fontSize: '13px', resize: 'vertical' }}
                 />
-                <button
-                  className="btn btn-danger btn-sm"
-                  onClick={() => removeEditorFile(codeEditor.activeFileIndex)}
-                  style={{ marginTop: '6px' }}
-                >
-                  🗑️ Delete File
-                </button>
+                <button className="btn btn-danger btn-sm" onClick={() => removeEditorFile(codeEditor.activeFileIndex)} style={{ marginTop: '6px' }}>🗑️ Delete File</button>
               </div>
-
               <div className="sheet-actions" style={{ marginTop: '20px' }}>
                 <button className="btn btn-outline" onClick={() => setShowCodeEditorModal(false)}>Cancel</button>
-                <button className="btn btn-success" onClick={deployFromEditor} disabled={deploying || !githubToken}>
-                  {deploying ? '⏳' : '🚀'} Deploy
-                </button>
+                <button className="btn btn-success" onClick={deployFromEditor} disabled={deploying || !githubToken}>{deploying ? '⏳' : '🚀'} Deploy</button>
               </div>
             </div>
           </div>
@@ -1474,46 +1644,20 @@ export default function Home() {
                 <div><h2>💰 Railway Usage</h2><p className="hint">{usageData.email}</p></div>
                 <button className="close-btn" onClick={() => setShowUsageModal(false)}>✕</button>
               </div>
-
               <div className="usage-grid">
-                <div className="usage-card">
-                  <div className="usage-label">Plan</div>
-                  <div className="usage-value">{usageData.plan || 'Free'}</div>
-                </div>
-                <div className="usage-card">
-                  <div className="usage-label">Free Credit</div>
-                  <div className="usage-value">${usageData.freeCredit.toFixed(2)}</div>
-                </div>
-                <div className="usage-card">
-                  <div className="usage-label">Projects</div>
-                  <div className="usage-value">{usageData.projectsCount}</div>
-                </div>
-                <div className="usage-card">
-                  <div className="usage-label">Services</div>
-                  <div className="usage-value">{usageData.servicesCount}</div>
-                </div>
-                <div className="usage-card">
-                  <div className="usage-label">Hours / mo</div>
-                  <div className="usage-value">{usageData.freeHours}h</div>
-                </div>
-                <div className="usage-card">
-                  <div className="usage-label">Est. Used</div>
-                  <div className="usage-value">~{usageData.estimatedHoursUsed}h</div>
-                </div>
+                <div className="usage-card"><div className="usage-label">Plan</div><div className="usage-value">{usageData.plan || 'Free'}</div></div>
+                <div className="usage-card"><div className="usage-label">Free Credit</div><div className="usage-value">${usageData.freeCredit.toFixed(2)}</div></div>
+                <div className="usage-card"><div className="usage-label">Projects</div><div className="usage-value">{usageData.projectsCount}</div></div>
+                <div className="usage-card"><div className="usage-label">Services</div><div className="usage-value">{usageData.servicesCount}</div></div>
+                <div className="usage-card"><div className="usage-label">Hours / mo</div><div className="usage-value">{usageData.freeHours}h</div></div>
+                <div className="usage-card"><div className="usage-label">Est. Used</div><div className="usage-value">~{usageData.estimatedHoursUsed}h</div></div>
               </div>
-
               <div className="info" style={{ marginTop: '16px' }}>
-                ⚠️ <b>Note:</b> Railway exact dollar amount GraphQL API me nahi deta.
-                Ye estimate hai aapke projects/services ke hisaab se.
-                <br /><br />
-                Exact dollar amount dekhne ke liye Railway dashboard pe jao:
-                <br /><b>railway.app → Account Settings → Usage</b>
+                ⚠️ <b>Note:</b> Railway exact dollar GraphQL API me nahi deta. Ye estimate hai.
+                <br /><br />Exact dekhne ke liye: <b>railway.app → Account Settings → Usage</b>
               </div>
-
               <div className="sheet-actions" style={{ marginTop: '20px' }}>
-                <a href="https://railway.app/account/usage" target="_blank" rel="noreferrer" className="btn btn-primary" style={{ flex: 1, textAlign: 'center' }}>
-                  🔗 Railway Usage Kholo
-                </a>
+                <a href="https://railway.app/account/usage" target="_blank" rel="noreferrer" className="btn btn-primary" style={{ flex: 1, textAlign: 'center' }}>🔗 Railway Usage</a>
                 <button className="btn btn-outline" onClick={() => setShowUsageModal(false)}>Close</button>
               </div>
             </div>
@@ -1529,11 +1673,7 @@ export default function Home() {
                 <div><h2>🌐 Preview</h2><p className="hint">{previewUrl}</p></div>
                 <button className="close-btn" onClick={() => setShowPreviewModal(false)}>✕</button>
               </div>
-              <iframe
-                src={previewUrl}
-                style={{ width: '100%', height: 'calc(100% - 80px)', border: 'none', borderRadius: '12px', background: '#fff' }}
-                title="Preview"
-              />
+              <iframe src={previewUrl} style={{ width: '100%', height: 'calc(100% - 80px)', border: 'none', borderRadius: '12px', background: '#fff' }} title="Preview" />
             </div>
           </div>
         )}
@@ -1755,6 +1895,39 @@ export default function Home() {
         .usage-card { background: #0a0a0f; border: 1px solid #2a2a4a; border-radius: 12px; padding: 12px; text-align: center; }
         .usage-label { font-size: 10px; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.5px; }
         .usage-value { font-size: 18px; font-weight: 800; color: #a855f7; margin-top: 4px; }
+
+        /* GitHub Repos Styles */
+        .github-user-bar { display: flex; align-items: center; gap: 12px; padding: 12px; background: linear-gradient(135deg, #12121f, #0f0f1a); border: 1px solid #2a2a4a; border-radius: 14px; margin-bottom: 16px; }
+        .github-avatar { width: 44px; height: 44px; border-radius: 50%; border: 2px solid #a855f7; }
+        .github-user-info { flex: 1; }
+        .github-user-name { font-size: 14px; font-weight: 700; color: #fff; }
+        .github-user-login { font-size: 11px; color: #9ca3af; }
+        .github-repo-count { font-size: 12px; color: #a855f7; font-weight: 700; background: rgba(168, 85, 247, 0.1); padding: 6px 12px; border-radius: 20px; }
+        .filter-tabs { display: flex; gap: 6px; margin-bottom: 16px; overflow-x: auto; }
+        .filter-tab { padding: 8px 14px; background: #12121f; border: 1px solid #2a2a4a; border-radius: 10px; font-size: 12px; font-weight: 600; color: #9ca3af; cursor: pointer; white-space: nowrap; }
+        .filter-tab.active { background: linear-gradient(135deg, #a855f7, #6366f1); color: #fff; border-color: transparent; }
+        .repo-list { display: flex; flex-direction: column; gap: 10px; }
+        .repo-card { background: linear-gradient(135deg, #12121f, #0f0f1a); border: 1px solid #2a2a4a; border-radius: 14px; padding: 14px; cursor: pointer; transition: all 0.2s; position: relative; overflow: hidden; }
+        .repo-card:active { transform: scale(0.99); border-color: #a855f7; }
+        .repo-card::before { content: ''; position: absolute; top: 0; left: 0; width: 3px; height: 100%; background: linear-gradient(180deg, #22c55e, #16a34a); }
+        .repo-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
+        .repo-icon { font-size: 22px; flex-shrink: 0; }
+        .repo-info { flex: 1; min-width: 0; }
+        .repo-name { font-size: 14px; font-weight: 700; color: #fff; word-break: break-word; }
+        .repo-full { font-size: 11px; color: #6b7280; word-break: break-all; margin-top: 2px; }
+        .repo-deploy-btn { padding: 8px 12px !important; font-size: 12px !important; min-height: 34px !important; flex-shrink: 0; }
+        .repo-desc { font-size: 12px; color: #9ca3af; line-height: 1.5; margin-bottom: 10px; padding-left: 32px; }
+        .repo-meta { display: flex; gap: 6px; flex-wrap: wrap; padding-left: 32px; }
+        .repo-detail-card { background: #0a0a0f; border: 1px solid #2a2a4a; border-radius: 12px; padding: 12px; margin-bottom: 16px; }
+        .repo-detail-row { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; font-size: 12px; border-bottom: 1px solid rgba(42, 42, 74, 0.5); }
+        .repo-detail-row:last-child { border-bottom: none; }
+        .repo-detail-label { color: #9ca3af; }
+        .repo-detail-val { color: #e5e7eb; font-weight: 600; word-break: break-all; text-align: right; }
+        .repo-files-preview { background: #0a0a0f; border: 1px solid #2a2a4a; border-radius: 12px; padding: 12px; margin-bottom: 16px; }
+        .repo-files-title { font-size: 12px; color: #9ca3af; margin-bottom: 8px; font-weight: 600; }
+        .repo-files-list { display: flex; gap: 6px; flex-wrap: wrap; }
+        .repo-file-chip { padding: 4px 10px; background: rgba(42, 42, 74, 0.5); border-radius: 8px; font-size: 11px; color: #cbd5e1; }
+
         .toast { position: fixed; bottom: 88px; left: 16px; right: 16px; padding: 14px 18px; background: #12121f; border-left: 4px solid #22c55e; border-radius: 12px; color: #fff; z-index: 200; font-size: 13px; font-weight: 500; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6); animation: toastIn 0.3s cubic-bezier(0.16, 1, 0.3, 1); word-break: break-word; max-width: 500px; margin: 0 auto; white-space: pre-line; }
         .toast.err { border-color: #ef4444; }
         @keyframes toastIn { from { transform: translateY(100px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
@@ -1765,6 +1938,7 @@ export default function Home() {
           .btn-row .btn:first-child { flex: 1; }
           .overlay { align-items: center; }
           .sheet { border-radius: 24px; padding: 20px 30px 30px; }
+          .repo-list { display: grid; grid-template-columns: repeat(2, 1fr); }
         }
       `}</style>
     </>
